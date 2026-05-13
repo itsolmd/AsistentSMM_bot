@@ -337,20 +337,122 @@ function normalizeText(text) {
  * 9. extractPhoneFromPage(page) — Puppeteer-based
  * -----------------------------------------------------------------
  * Extracts phone number from a 999.md page using multiple sources:
- *   1. JSON-LD (schema.org)
- *   2. Script tags with hydration state
- *   3. href="tel:" links
- *   4. Button click (existing fallback)
+ *   1. Click "Arată numărul" button ([data-testid="show-number"])
+ *      → wait for tel: link → extract (PRIMARY — real owner phone)
+ *   2. href="tel:" links (fallback if already visible)
+ *   3. JSON-LD (schema.org)
+ *   4. __NEXT_DATA__ hydration state
  *   5. Body text regex
  *
  * Returns the first valid phone found, or null.
  * ================================================================= */
 async function extractPhoneFromPage(page) {
   try {
-    // ── SOURCE 1: href="tel:" links (PRIMARY — most reliable) ──
-    // BUG FIX: Use tel: as PRIMARY source, NOT visible text
-    // because formatting/spaces may vary in visible text
+    // ── SOURCE 0: Next.js RSC flight data (__next_f) — most reliable ──
+    // 999.md uses Next.js App Router (no __NEXT_DATA__). The phone is
+    // embedded in RSC flight data as phoneNumbers.value.phone_numbers[]
+    // inside inline <script> tags with self.__next_f.push(...).
+    // The data is JavaScript-string-escaped (e.g. \"phone_numbers\":[\"373...\"])
+    // so we search for the raw phone number pattern directly.
+    const KNOWN_NON_OWNER_PHONES = ['37322888002', '+37322888002'];
+    const rscPhone = await page.evaluate(() => {
+      const scripts = document.querySelectorAll('script');
+      for (const script of scripts) {
+        const text = script.textContent || '';
+        // Search for Moldovan phone numbers (373 + 8-9 digits)
+        const phoneMatches = text.matchAll(/373\d{8,9}/g);
+        for (const match of phoneMatches) {
+          const phone = match[0];
+          // Skip known non-owner numbers (support/developer)
+          if (phone === '37322888002') continue;
+          return phone;
+        }
+      }
+      return null;
+    });
+    if (rscPhone) {
+      console.log('📞 [extractPhoneFromPage] Found in RSC flight data:', rscPhone);
+      return rscPhone;
+    }
+
+    // ── SOURCE 1: Click "Arată numărul" button → extract owner's phone ──
+    // 999.md hides the real phone behind a button with data-testid="show-number".
+    // Clicking it reveals the owner's phone.
+    const showBtn = await page.$('[data-testid="show-number"]');
+    if (showBtn) {
+      console.log('[PHONE DEBUG] Show button found');
+
+      // Snapshot existing tel: links BEFORE clicking
+      const existingTelHrefs = await page.evaluate(() => {
+        const links = document.querySelectorAll('a[href^="tel:"]');
+        return Array.from(links).map(l => l.getAttribute('href'));
+      });
+      console.log('[PHONE DEBUG] Existing tel: links before click:', existingTelHrefs);
+
+      await showBtn.click();
+      console.log('[PHONE DEBUG] Button clicked');
+
+      // Wait briefly for React re-render after click
+      await new Promise(r => setTimeout(r, 1500));
+
+      // After click: find the NEW tel: link that wasn't there before
+      const telPhone = await page.evaluate((existing) => {
+        const allLinks = document.querySelectorAll('a[href^="tel:"]');
+        for (const link of allLinks) {
+          const href = link.getAttribute('href');
+          if (href && !existing.includes(href)) {
+            return href
+              ?.replace('tel:', '')
+              ?.replace(/\s+/g, '')
+              ?.trim();
+          }
+        }
+        // Fallback: any tel link
+        const anyLink = document.querySelector('a[href^="tel:"]');
+        if (anyLink) {
+          const href = anyLink.getAttribute('href');
+          return href
+            ?.replace('tel:', '')
+            ?.replace(/\s+/g, '')
+            ?.trim();
+        }
+        return null;
+      }, existingTelHrefs);
+
+      if (telPhone) {
+        console.log('[PHONE DEBUG] Extracted phone:', telPhone);
+        return telPhone;
+      }
+
+      // Fallback after click: try body text regex
+      const pageTextAfter = await page.evaluate(() => document.body.innerText);
+      const phoneMatch = pageTextAfter.match(/(?:\+?373|0)\s*\d[\d\s]{6,}/);
+      if (phoneMatch) {
+        const phone = phoneMatch[0].trim().replace(/\s+/g, '');
+        console.log('[PHONE DEBUG] Extracted phone from body after click:', phone);
+        return phone;
+      }
+    } else {
+      console.log('[PHONE DEBUG] Show button not found, trying fallbacks');
+    }
+
+    // ── SOURCE 2: href="tel:" links (already visible, no click needed) ──
+    // BUG FIX v3.2: Use before/after snapshot approach — same as Source 1
+    // but without clicking. This handles pages where the phone is already
+    // visible without needing to click "Arată numărul".
     const telPhone = await page.evaluate(() => {
+      // Try phone__link class first (more specific)
+      const phoneLink = document.querySelector('a[class*="phone__link"]');
+      if (phoneLink) {
+        const href = phoneLink.getAttribute('href');
+        if (href && href.startsWith('tel:')) {
+          return href
+            ?.replace('tel:', '')
+            ?.replace(/\s+/g, '')
+            ?.trim();
+        }
+      }
+      // Fallback: any tel link on the page
       const telLink = document.querySelector('a[href^="tel:"]');
       if (telLink) {
         const href = telLink.getAttribute('href');
@@ -366,7 +468,7 @@ async function extractPhoneFromPage(page) {
       return telPhone;
     }
 
-    // ── SOURCE 2: JSON-LD structured data ──────────────────────
+    // ── SOURCE 3: JSON-LD structured data ──────────────────────
     const jsonLdPhone = await page.evaluate(() => {
       try {
         const scripts = document.querySelectorAll('script[type="application/ld+json"]');
@@ -383,46 +485,26 @@ async function extractPhoneFromPage(page) {
       return jsonLdPhone;
     }
 
-    // ── SOURCE 3: React/Next.js hydration state ────────────────
+    // ── SOURCE 4: React/Next.js hydration state (__NEXT_DATA__) ──
     const nextDataPhone = await page.evaluate(() => {
       try {
         const script = document.getElementById('__NEXT_DATA__');
         if (!script) return null;
         const data = JSON.parse(script.textContent);
         const advert = data?.props?.pageProps?.advert;
-        // Check various possible locations for phone
-        return advert?.phone || advert?.phone_number || advert?.contact?.phone || null;
+        // Check all known field locations for phone in 999.md SSR data
+        return advert?.phone
+          || advert?.phone_number
+          || advert?.user?.phone
+          || advert?.contact?.phone
+          || advert?.contacts?.[0]
+          || null;
       } catch (_) { /* ignore */ }
       return null;
     });
     if (nextDataPhone) {
       console.log('📞 [extractPhoneFromPage] Found in __NEXT_DATA__:', nextDataPhone);
       return nextDataPhone;
-    }
-
-    // ── SOURCE 4: Button click (original logic) ────────────────
-    const buttons = await page.$$('button');
-    let phoneBtn = null;
-    for (const btn of buttons) {
-      const text = await page.evaluate(el => el.textContent.trim(), btn);
-      if (/arată|telefon|show|phone|contacte/i.test(text)) {
-        phoneBtn = btn;
-        break;
-      }
-    }
-    if (!phoneBtn) {
-      phoneBtn = await page.$('button:has(span), button');
-    }
-    if (phoneBtn) {
-      await phoneBtn.click();
-      await new Promise(r => setTimeout(r, 1500));
-      const pageTextAfter = await page.evaluate(() => document.body.innerText);
-      const phoneMatch = pageTextAfter.match(/(?:\+?373|0)\s*\d[\d\s]{6,}/);
-      if (phoneMatch) {
-        const phone = phoneMatch[0].trim().replace(/\s+/g, '');
-        console.log('📞 [extractPhoneFromPage] Found after button click:', phone);
-        return phone;
-      }
     }
 
     // ── SOURCE 5: Direct regex in body text ────────────────────

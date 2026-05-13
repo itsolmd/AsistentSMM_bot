@@ -52,12 +52,36 @@ async function uploadImageFromURL999(ctx, imageSrc) {
 
 //scrap regions form the link provided in db
 async function extractRegion(ctx) {
-  console.log("Latitudine din post on 999.js:", ctx.session.data.geolocation.lat);
-console.log("Longitudine din post on 999.js::", ctx.session.data.geolocation.lng);
+  // ═══════════════════════════════════════════════════════════════
+  // SAFE GEO EXTRACTION with validation
+  // Accepts: lat/lng, lat/lon, latitude/longitude
+  // Prevents Invalid LatLng crashes from undefined coordinates
+  // ═══════════════════════════════════════════════════════════════
+  const geo = ctx.session.data.geolocation;
+  const safeLat = geo?.lat ?? geo?.latitude;
+  const safeLng = geo?.lng ?? geo?.lon ?? geo?.longitude;
+
+  console.log('[GEO RAW] geolocation from session:', JSON.stringify(geo));
+  console.log('[GEO NORMALIZED] lat:', safeLat, 'lng:', safeLng);
+
+  // VALIDATION: Both coordinates must be finite numbers
+  const latNum = Number(safeLat);
+  const lngNum = Number(safeLng);
+  const hasValidGeo = Number.isFinite(latNum) && Number.isFinite(lngNum) &&
+    latNum >= -90 && latNum <= 90 && lngNum >= -180 && lngNum <= 180;
+
+  if (!hasValidGeo) {
+    console.log('[GEO VALIDATION] ❌ Invalid coordinates — cannot extract region from map.md');
+    console.log('[GEO VALIDATION] lat:', latNum, 'lng:', lngNum);
+    // Return a basic Chișinău location when geo is invalid
+    return [{ id: "7", value: "12900" }];
+  }
+
+  console.log('[GEO VALIDATION] ✅ Valid — lat:', latNum, 'lng:', lngNum);
 
   //aici se afla numele la raion, sector, strada si nr la bloc
   const mapObj = await axios.get(
-    `https://map.md/api/companies/webmap/near?lat=${ctx.session.data.geolocation.lat}&lon=${ctx.session.data.geolocation.lng}`,
+    `https://map.md/api/companies/webmap/near?lat=${latNum}&lon=${lngNum}`,
     {
       headers: {
         "Content-Type": "application/json",
@@ -69,6 +93,7 @@ console.log("Longitudine din post on 999.js::", ctx.session.data.geolocation.lng
     }
   );
   console.log("Răspunsul de la API din post on 999.js:", mapObj.data);
+  console.log('[GEO PAYLOAD] map.md request with lat:', latNum, 'lon:', lngNum);
   //                  Chisinau Municipiu
   const location = [{ id: "7", value: "12900" }];
 
@@ -189,17 +214,31 @@ const extractFeatures = (data, featuresObj, ctx) => {
       });
     }
   }
-  // Geolocation
+  // Geolocation — Safe extraction with validation for 999.md API
   if (data.geolocation) {
     const feature = findFeatureByTitle("Harta");
-    if (feature) {
+
+    // Safe extraction: accept any coordinate key naming
+    const geoLat = data.geolocation.lat ?? data.geolocation.latitude;
+    const geoLon = data.geolocation.lon ?? data.geolocation.lng ?? data.geolocation.longitude;
+
+    console.log('[GEO RAW] extractFeatures geolocation:', JSON.stringify(data.geolocation));
+    console.log('[GEO NORMALIZED] lat:', geoLat, 'lon:', geoLon);
+
+    const latNum = Number(geoLat);
+    const lonNum = Number(geoLon);
+    const validGeo = Number.isFinite(latNum) && Number.isFinite(lonNum) &&
+      latNum >= -90 && latNum <= 90 && lonNum >= -180 && lonNum <= 180;
+
+    if (feature && validGeo) {
       features.push({
         id: feature.id,
-        value: {
-          lat: data.geolocation.lat,
-          lon: data.geolocation.lng,
-        },
+        value: { lat: latNum, lon: lonNum },
       });
+      console.log('[GEO VALIDATION] ✅ Added 999.md map feature:', latNum, lonNum);
+    } else if (!validGeo) {
+      console.log('[GEO VALIDATION] ❌ Invalid geolocation — skipping 999.md map feature');
+      console.log('[GEO VALIDATION] lat:', latNum, 'lon:', lonNum);
     }
   }
 
@@ -357,34 +396,57 @@ const extractFeatures = (data, featuresObj, ctx) => {
       }
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // HEATING MAP — Maps normalized heating type to Strapi numeric IDs
+    // ══════════════════════════════════════════════════════════════
+    const POST_HEATING_MAP = {
+      AUTONOMOUS: 1,
+      CENTRALIZED: 2,
+    };
+
     // Heating — with smart fallback based on building type
     let heatingId = data.heating != null && data.heating !== undefined ? data.heating : null;
 
     // ── HEATING FALLBACK: Infer from building/fund type when heating is missing ──
     if (heatingId === null && data.building) {
-      const normalizedBuilding = data.building
-        ?.toLowerCase()
-        ?.normalize("NFD")
-        ?.replace(/[\u0300-\u036f]/g, "");
+      // BUG FIX v3.0: data.building can be a string OR an object {ro: "..."}
+      // Handle both cases to prevent .toLowerCase() crash on objects
+      let buildingStr = '';
+      if (typeof data.building === 'string') {
+        buildingStr = data.building;
+      } else if (data.building?.ro) {
+        buildingStr = data.building.ro;
+      } else if (data.building?.title) {
+        buildingStr = data.building.title;
+      } else {
+        buildingStr = String(data.building);
+      }
 
-      console.log("[HEATING FALLBACK] Building:", data.building);
+      const normalizedBuilding = buildingStr
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
 
-      // New buildings → Autonomous (1)
+      console.log("[HEATING FALLBACK] Building (raw):", data.building);
+      console.log("[HEATING FALLBACK] Building (normalized):", normalizedBuilding);
+
+      // "Construcţii noi" => AUTONOMOUS => ID 1
       if (
         normalizedBuilding.includes("constructii noi") ||
         normalizedBuilding.includes("bloc nou")
       ) {
-        heatingId = 1;
-        console.log("[HEATING FALLBACK] Selected heating: AUTONOMOUS (1) — new building detected");
+        heatingId = POST_HEATING_MAP.AUTONOMOUS;
+        console.log("[HEATING FALLBACK] Selected heating: AUTONOMOUS (ID " + POST_HEATING_MAP.AUTONOMOUS + ") — 'Construcţii noi' detected");
       }
-
-      // Secondary market → Centralized (2)
-      if (
+      // Secondary/old building => CENTRALIZED => ID 2
+      else if (
         normalizedBuilding.includes("fond secundar") ||
         normalizedBuilding.includes("secundar")
       ) {
-        heatingId = 2;
-        console.log("[HEATING FALLBACK] Selected heating: CENTRALIZED (2) — secondary market detected");
+        heatingId = POST_HEATING_MAP.CENTRALIZED;
+        console.log("[HEATING FALLBACK] Selected heating: CENTRALIZED (ID " + POST_HEATING_MAP.CENTRALIZED + ") — secondary/old building detected");
+      } else {
+        console.log("[HEATING FALLBACK] No building match for:", normalizedBuilding);
       }
     }
 

@@ -17,15 +17,21 @@ function buildTelegramLocation(parsedLocation) {
 
   const { city, sector, street, streetNumber } = parsedLocation;
 
-  // Build street part: "str. Tudor Vladimirescu 38a" (number attached without comma)
-  const streetPart = street
-    ? `str. ${street.replace(/^(str\.|strada)\s+/i, '')}${streetNumber ? ` ${streetNumber}` : ''}`
+  // Normalize street: "strada Ialoveni" → "str. Ialoveni", "str Ialoveni" → "str. Ialoveni"
+  const normalizedStreet = street
+    ?.replace(/^strada\s+/i, "str. ")
+    ?.replace(/^str\s+/i, "str. ")
+    ?.trim();
+
+  // Combine street and number into a single item: "str. Ialoveni 136"
+  const streetLine = normalizedStreet
+    ? `${normalizedStreet}${streetNumber ? ` ${streetNumber}` : ""}`
     : null;
 
   const parts = [
     city,
     sector,
-    streetPart,
+    streetLine,
   ].filter(Boolean);
 
   const formatted = parts.join(', ');

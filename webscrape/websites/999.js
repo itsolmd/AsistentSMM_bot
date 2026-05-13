@@ -430,14 +430,65 @@ const scrap_999 = async (ctx, url) => {
         }
       }
 
-      // ── Tip ofertă (Vând/Închiriez) ─────────────────────────
+      // ══════════════════════════════════════════════════════════
+      // OFFER TYPE — Vând / Închiriez / Schimb
+      // ══════════════════════════════════════════════════════════
+      // OFFER_TYPE_MAP: maps UI labels to 999.md offer_type IDs
+      // 776 = Vând (Sell), 777 = Cumpăr (Buy), 778 = Schimb (Exchange)
+      // 779 = Închiriez (Rent)
+      // ══════════════════════════════════════════════════════════
+      const OFFER_TYPE_MAP = {
+        'Vând': 776,
+        'Vînzare': 776,
+        'Vanzare': 776,
+        'Închiriez': 779,
+        'Inchiriez': 779,
+        'Schimb': 778,
+        'Cumpăr': 777,
+        'Cumpar': 777,
+      };
+
       let offerType = 'N/A';
+      let offerTypeId = null;
+      // Primary: __NEXT_DATA__ advert.offer_type
       if (advert?.offer_type?.value) {
         offerType = advert.offer_type.value;
-      } else {
-        const ot = extractByLabel('Tipul', bodyText);
-        if (ot) offerType = ot;
+        console.log('[OFFER TYPE] From __NEXT_DATA__:', offerType);
       }
+      // Secondary: .styles_filters__type__selector__title__NdcP_ selector
+      if (offerType === 'N/A') {
+        const filterTypeEl = document.querySelector('.styles_filters__type__selector__title__NdcP_');
+        if (filterTypeEl) {
+          offerType = filterTypeEl.textContent.trim();
+          console.log('[OFFER TYPE] From selector:', offerType);
+        }
+      }
+      // Tertiary: extractByLabel('Tipul', bodyText)
+      if (offerType === 'N/A') {
+        const ot = extractByLabel('Tipul', bodyText);
+        if (ot) {
+          offerType = ot;
+          console.log('[OFFER TYPE] From bodyText:', offerType);
+        }
+      }
+      // Map to numeric ID for filter URL
+      const normalizedOfferType = offerType
+        ?.toLowerCase()
+        ?.normalize('NFD')
+        ?.replace(/[\u0300-\u036f]/g, '')
+        ?.trim();
+      for (const [key, id] of Object.entries(OFFER_TYPE_MAP)) {
+        const normalizedKey = key
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim();
+        if (normalizedOfferType?.includes(normalizedKey)) {
+          offerTypeId = id;
+          break;
+        }
+      }
+      console.log('[OFFER TYPE] Final text:', offerType, '→ ID:', offerTypeId);
 
       // ── Titlu ────────────────────────────────────────────────
       let title = 'N/A';
@@ -482,36 +533,253 @@ const scrap_999 = async (ctx, url) => {
       });
       console.log('[RAW IMAGES extracted from page]', images.length, 'images');
 
-      // ── Geolocation (BUG #9 FIXED: extract real GPS) ─────────
+      // ══════════════════════════════════════════════════════════════
+      // GEOLOCATION — Multiple source extraction
+      // ══════════════════════════════════════════════════════════════
+      // Priority order:
+      //   1. advert.geolocation / advert.map / advert.coordinates (__NEXT_DATA__)
+      //   2. __INITIAL_STATE__ (legacy Next.js pages)
+      //   3. application/ld+json scripts
+      //   4. Map widget data (Leaflet, Yandex, Google Maps)
+      //   5. window globals / inline scripts
+      // ══════════════════════════════════════════════════════════════
       let geolocation = null;
-      if (advert?.geolocation) {
-        geolocation = {
-          lat: advert.geolocation.lat || advert.geolocation.latitude,
-          lng: advert.geolocation.lng || advert.geolocation.longitude || advert.geolocation.lon,
-        };
-      } else if (advert?.map?.lat && advert?.map?.lng) {
-        geolocation = {
-          lat: advert.map.lat,
-          lng: advert.map.lng,
-        };
-      } else if (advert?.coordinates) {
-        geolocation = {
-          lat: advert.coordinates.lat || advert.coordinates.latitude,
-          lng: advert.coordinates.lng || advert.coordinates.longitude || advert.coordinates.lon,
-        };
+
+      // ── Helper: normalize extracted coords ──────────────────────
+      // NORMALIZED FORMAT: { lat: number, lng: number }
+      // Accepts any input naming (lat/lng/lon/longitude) via safe extraction.
+      const normalizeCoords = (lat, lng) => {
+        console.log('[GEO RAW] lat:', lat, 'lng:', lng);
+        if (lat == null || lng == null) {
+          console.log('[GEO VALIDATION] ❌ Null/undefined — lat:', lat, 'lng:', lng);
+          return null;
+        }
+        const latN = Number(lat);
+        const lngN = Number(lng);
+        console.log('[GEO NORMALIZED] lat:', latN, 'lng:', lngN);
+        if (!Number.isFinite(latN) || !Number.isFinite(lngN)) {
+          console.log('[GEO VALIDATION] ❌ Not finite — lat:', latN, 'lng:', lngN);
+          return null;
+        }
+        if (latN < -90 || latN > 90 || lngN < -180 || lngN > 180) {
+          console.log('[GEO VALIDATION] ❌ Out of range — lat:', latN, 'lng:', lngN);
+          return null;
+        }
+        if (Math.abs(latN) < 0.01 && Math.abs(lngN) < 0.01) {
+          console.log('[GEO VALIDATION] ❌ Placeholder zero/null — lat:', latN, 'lng:', lngN);
+          return null;
+        }
+        console.log('[GEO VALIDATION] ✅ Valid — lat:', latN, 'lng:', lngN);
+        return { lat: latN, lng: lngN };
+      };
+
+      // ── SOURCE 1: __NEXT_DATA__ (Next.js SSR JSON) ─────────────
+      if (!geolocation && advert?.geolocation) {
+        const lat = advert.geolocation.lat ?? advert.geolocation.latitude;
+        const lng = advert.geolocation.lng ?? advert.geolocation.longitude ?? advert.geolocation.lon;
+        geolocation = normalizeCoords(lat, lng);
+        if (geolocation) console.log('[GEO SOURCE] From advert.geolocation');
+      }
+      if (!geolocation && advert?.map?.lat && advert?.map?.lng) {
+        geolocation = normalizeCoords(advert.map.lat, advert.map.lng);
+        if (geolocation) console.log('[GEO SOURCE] From advert.map');
+      }
+      if (!geolocation && advert?.coordinates) {
+        const lat = advert.coordinates.lat ?? advert.coordinates.latitude;
+        const lng = advert.coordinates.lng ?? advert.coordinates.longitude ?? advert.coordinates.lon;
+        geolocation = normalizeCoords(lat, lng);
+        if (geolocation) console.log('[GEO SOURCE] From advert.coordinates');
       }
 
-      // ── Telefon (BUG FIX: use href="tel:" as PRIMARY source) ──
+      // ── SOURCE 2: __INITIAL_STATE__ (legacy Next.js) ──────────
+      if (!geolocation) {
+        try {
+          const initState = window.__INITIAL_STATE__;
+          if (initState) {
+            // Try known paths for coordinates
+            const paths = [
+              'advert.geolocation',
+              'advert.map',
+              'listing.geolocation',
+              'listing.coordinates',
+              'property.geolocation',
+              'property.coordinates',
+              'data.advert.geolocation',
+              'data.listing.coordinates',
+            ];
+            for (const path of paths) {
+              const val = path.split('.').reduce((obj, key) => obj?.[key], initState);
+              if (val) {
+                const lat = val.lat ?? val.latitude;
+                const lng = val.lng ?? val.lon ?? val.longitude;
+                geolocation = normalizeCoords(lat, lng);
+                if (geolocation) {
+                  console.log('[GEO SOURCE] From __INITIAL_STATE__.' + path);
+                  break;
+                }
+              }
+            }
+          }
+        } catch (_) { /* silent */ }
+      }
+
+      // ── SOURCE 3: application/ld+json scripts ─────────────────
+      if (!geolocation) {
+        try {
+          const ldScripts = document.querySelectorAll('script[type="application/ld+json"]');
+          for (const script of ldScripts) {
+            let data;
+            try { data = JSON.parse(script.textContent); } catch (_) { continue; }
+            const items = Array.isArray(data) ? data : [data];
+            for (const item of items) {
+              // Schema.org Place / GeoCoordinates pattern
+              const geo = item?.geo || item?.location?.geo || item?.address?.geo;
+              if (geo) {
+                const lat = geo.latitude ?? geo.lat;
+                const lng = geo.longitude ?? geo.lng ?? geo.lon;
+                geolocation = normalizeCoords(lat, lng);
+                if (geolocation) {
+                  console.log('[GEO SOURCE] From application/ld+json');
+                  break;
+                }
+              }
+            }
+            if (geolocation) break;
+          }
+        } catch (_) { /* silent */ }
+      }
+
+      // ── SOURCE 4: Map widget data (Leaflet / Yandex / Google) ─
+      if (!geolocation) {
+        try {
+          // Leaflet: check for L.map instances or data attributes
+          const mapContainers = document.querySelectorAll('[class*="leaflet"], [id*="map"]');
+          for (const el of mapContainers) {
+            // Check data attributes
+            const lat = el.getAttribute('data-lat') || el.getAttribute('data-center-lat');
+            const lng = el.getAttribute('data-lng') || el.getAttribute('data-lon') || el.getAttribute('data-center-lng');
+            geolocation = normalizeCoords(lat, lng);
+            if (geolocation) {
+              console.log('[GEO SOURCE] From Leaflet/map widget data attributes');
+              break;
+            }
+          }
+
+          // Yandex Maps: window.ymapsMapData
+          if (!geolocation && window.ymapsMapData) {
+            const center = window.ymapsMapData?.center || window.ymapsMapData?.geometry?.coordinates;
+            if (center && Array.isArray(center) && center.length >= 2) {
+              geolocation = normalizeCoords(center[0], center[1]);
+              if (geolocation) console.log('[GEO SOURCE] From window.ymapsMapData');
+            }
+          }
+
+          // Google Maps: search for google maps iframe data
+          if (!geolocation) {
+            const gmapsIframes = document.querySelectorAll('iframe[src*="google.com/maps"]');
+            for (const iframe of gmapsIframes) {
+              const src = iframe.getAttribute('src') || '';
+              const llMatch = src.match(/[?&]ll=([\d.]+),([\d.]+)/);
+              if (llMatch) {
+                geolocation = normalizeCoords(llMatch[1], llMatch[2]);
+                if (geolocation) {
+                  console.log('[GEO SOURCE] From Google Maps iframe URL');
+                  break;
+                }
+              }
+            }
+          }
+        } catch (_) { /* silent */ }
+      }
+
+      // ── SOURCE 5: Inline scripts with coordinate patterns ──────
+      if (!geolocation) {
+        try {
+          const allScripts = document.querySelectorAll('script:not([src])');
+          const coordPatterns = [
+            /lat['"]?\s*[:=]\s*([\d.]+)[,;}\s]/i,
+            /latitude['"]?\s*[:=]\s*([\d.]+)[,;}\s]/i,
+            /center['"]?\s*:\s*\[\s*([\d.]+)\s*,\s*([\d.]+)\s*\]/,
+          ];
+          for (const script of allScripts) {
+            const text = script.textContent || '';
+
+            // Try named coordinate properties
+            for (const pattern of coordPatterns) {
+              const latMatch = text.match(pattern);
+              if (latMatch && latMatch[1]) {
+                const latVal = parseFloat(latMatch[1]);
+                if (Number.isFinite(latVal) && Math.abs(latVal) > 1) {
+                  // Found a promising latitude — try to find corresponding longitude
+                  // Search for `lon` or `lng` after the lat match position
+                  const afterLat = text.slice(latMatch.index + latMatch[0].length);
+                  const lonMatch = afterLat.match(/['"]?(?:lon|lng|longitude)['"]?\s*[:=]\s*([\d.]+)/i);
+                  if (lonMatch) {
+                    const lonVal = parseFloat(lonMatch[1]);
+                    geolocation = normalizeCoords(latVal, lonVal);
+                    if (geolocation) {
+                      console.log('[GEO SOURCE] From inline script coordinates');
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+            if (geolocation) break;
+          }
+        } catch (_) { /* silent */ }
+      }
+
+      // ── Telefon (BUG FIX v3.2: prefer RSC flight data, then DOM selectors) ──
+      // BUG FIX v3.2: 999.md now uses Next.js App Router (no __NEXT_DATA__).
+      // The phone is embedded in RSC flight data (__next_f) inside inline scripts.
+      // Fall back to DOM selectors if flight data has no phone.
       let phoneNr = null;
-      const telLink = document.querySelector('a[href^="tel:"]');
-      if (telLink) {
-        const phoneHref = telLink.getAttribute('href');
-        phoneNr = phoneHref
-          ?.replace('tel:', '')
-          ?.replace(/\s+/g, '')
-          ?.trim();
-        console.log('[PHONE] href:', phoneHref);
-        console.log('[PHONE] normalized:', phoneNr);
+
+      // Source A: RSC flight data (inline scripts with self.__next_f.push)
+      // Search for Moldovan phone pattern (373 + 8-9 digits) in all scripts
+      const scripts = document.querySelectorAll('script');
+      for (const script of scripts) {
+        const text = script.textContent || '';
+        const phoneMatches = [...text.matchAll(/373\d{8,9}/g)];
+        for (const match of phoneMatches) {
+          const phone = match[0];
+          // Skip known non-owner numbers (support/developer)
+          if (phone === '37322888002') continue;
+          phoneNr = phone;
+          console.log('[PHONE] From RSC flight data:', phoneNr);
+          break;
+        }
+        if (phoneNr) break;
+      }
+
+      // Source B: DOM selectors (fallback if RSC flight data had no phone)
+      if (!phoneNr) {
+        // Primary: phone__link class (generic, not hash-dependent)
+        const phoneLink = document.querySelector('a[class*="phone__link"]');
+        if (phoneLink) {
+          const href = phoneLink.getAttribute('href');
+          if (href && href.startsWith('tel:')) {
+            phoneNr = href
+              ?.replace('tel:', '')
+              ?.replace(/\s+/g, '')
+              ?.trim();
+            console.log('[PHONE] From DOM phone__link:', phoneNr);
+          }
+        }
+      }
+      if (!phoneNr) {
+        // Fallback: any tel: link
+        const anyTelLink = document.querySelector('a[href^="tel:"]');
+        if (anyTelLink) {
+          const fallbackHref = anyTelLink.getAttribute('href');
+          phoneNr = fallbackHref
+            ?.replace('tel:', '')
+            ?.replace(/\s+/g, '')
+            ?.trim();
+          console.log('[PHONE] Fallback href:', fallbackHref);
+          console.log('[PHONE] Fallback normalized:', phoneNr);
+        }
       }
 
       // ── Return ───────────────────────────────────────────────
@@ -527,6 +795,7 @@ const scrap_999 = async (ctx, url) => {
         building,
         price,
         offerType,
+        offerTypeId,      // BUG FIX v3.0: numeric ID for filter URL (776=Vând, 779=Închiriez, etc.)
         title,
         description,
         images,
@@ -598,6 +867,14 @@ const scrap_999 = async (ctx, url) => {
     };
 
     // ══════════════════════════════════════════════════════════════
+    // HEATING MAP — Maps normalized heating type to Strapi numeric IDs
+    // ══════════════════════════════════════════════════════════════
+    const HEATING_MAP = {
+      AUTONOMOUS: 1,
+      CENTRALIZED: 2,
+    };
+
+    // ══════════════════════════════════════════════════════════════
     // HEATING DETECTION — Normalized diacritic-aware matching
     // ══════════════════════════════════════════════════════════════
     // Sources: advert.features, bodyText, description
@@ -624,12 +901,14 @@ const scrap_999 = async (ctx, url) => {
         normalizedHeatingStr.includes('autonoma') ||
         normalizedHeatingStr.includes('centrala proprie')
       ) {
-        normalizedHeating = 1;
+        normalizedHeating = HEATING_MAP.AUTONOMOUS;
+        console.log('[HEATING] Mapped to AUTONOMUS ID:', HEATING_MAP.AUTONOMOUS);
       }
 
       // Detect centralizată (includes: centralizată, încălzire centralizată)
       if (normalizedHeatingStr.includes('centralizata')) {
-        normalizedHeating = 2;
+        normalizedHeating = HEATING_MAP.CENTRALIZED;
+        console.log('[HEATING] Mapped to CENTRALIZED ID:', HEATING_MAP.CENTRALIZED);
       }
 
       console.log('[HEATING] Final mapped ID:', normalizedHeating);
@@ -643,24 +922,26 @@ const scrap_999 = async (ctx, url) => {
           .normalize('NFD')
           .replace(/[\u0300-\u036f]/g, '');
 
-        console.log('[HEATING FALLBACK] Building:', extracted.building);
+        console.log('[HEATING FALLBACK] Building (raw):', extracted.building);
+        console.log('[HEATING FALLBACK] Building (normalized):', normalizedBuilding);
 
-        // New buildings → Autonomous (1)
+        // "Construcţii noi" => AUTONOMOUS => ID 1
         if (
           normalizedBuilding.includes('constructii noi') ||
           normalizedBuilding.includes('bloc nou')
         ) {
-          normalizedHeating = 1;
-          console.log('[HEATING FALLBACK] Selected heating: AUTONOMOUS (1) — new building detected');
+          normalizedHeating = HEATING_MAP.AUTONOMOUS;
+          console.log('[HEATING FALLBACK] Selected heating: AUTONOMOUS (ID ' + HEATING_MAP.AUTONOMOUS + ') — "Construcţii noi" detected');
         }
-
-        // Secondary market → Centralized (2)
-        if (
+        // Secondary/old building => CENTRALIZED => ID 2
+        else if (
           normalizedBuilding.includes('fond secundar') ||
           normalizedBuilding.includes('secundar')
         ) {
-          normalizedHeating = 2;
-          console.log('[HEATING FALLBACK] Selected heating: CENTRALIZED (2) — secondary market detected');
+          normalizedHeating = HEATING_MAP.CENTRALIZED;
+          console.log('[HEATING FALLBACK] Selected heating: CENTRALIZED (ID ' + HEATING_MAP.CENTRALIZED + ') — secondary/old building detected');
+        } else {
+          console.log('[HEATING FALLBACK] No building match for:', normalizedBuilding);
         }
       }
     }
@@ -727,6 +1008,7 @@ const scrap_999 = async (ctx, url) => {
 
     // ── 5. Aplică regionParser pe locație (BUG #2, #3 FIXED) ──
     const parsedLocation = parseLocation(extracted.location);
+    console.log("[ADDRESS PARSER] Parsed:", parsedLocation);
     const formattedLocation = formatLocation(parsedLocation, true);
 
     // ── 5. Formatează ID-ul ────────────────────────────────────
@@ -735,7 +1017,16 @@ const scrap_999 = async (ctx, url) => {
       : 'N/A';
 
     // ── 6. Extrage telefonul (BUG #4 FIXED) ────────────────────
-    const phoneNr = await extractPhoneFromPage(page);
+    let phoneNr = await extractPhoneFromPage(page);
+
+    // Normalize phone: remove spaces, keep only digits and +
+    if (phoneNr) {
+      phoneNr = phoneNr
+        ?.replace(/\s+/g, '')
+        ?.replace(/[^\d+]/g, '');
+    }
+    console.log("[PHONE] Extracted:", phoneNr);
+
     await browser.close();
 
     // ── 7. Construiește formattedText (BUG #1, #11 FIXED) ──────
@@ -773,27 +1064,61 @@ ${phoneNr ? `📞 Telefon: ${phoneNr}` : ''}
     // ── 8. Deduplicate images (BUG #5 FIXED) ───────────────────
     const uniqueImages = deduplicateImages(extracted.images);
 
-    // ── 9. Geolocation (BUG #9 FIXED + v2.1 street-level) ─────
+    // ── 9. Geolocation (v5.0 — Nominatim OSM geocoder) ────────────
+    // PRIMARY: Coordinates extracted from page sources (__NEXT_DATA__,
+    // __INITIAL_STATE__, ld+json, map widgets, inline scripts).
+    // FALLBACK: Nominatim OpenStreetMap API (replaces unreliable map.md).
+    //
+    // Fallback strategy (precision order):
+    //   1. Full street address (with prefix normalization)
+    //   2. Street without prefix, no number
+    //   3. Sector + city centroid
+    //   AVOIDS: city-only geocoding (inaccurate for real estate)
+    // ═══════════════════════════════════════════════════════════════
+    // GEOLOCATION — Safe extraction + validation + Nominatim fallback
+    // ALL coordinates normalized to { lat, lng } format.
+    // ═══════════════════════════════════════════════════════════════
     let geolocation = extracted.geolocation;
-    if (!geolocation) {
-      // Fallback: build full geoAddress from parsed location and query map.md
-      console.log('⚠️ [scrap_999] No GPS in __NEXT_DATA__, querying map.md with full address');
+
+    // Safe check: must have both finite lat and lng
+    const hasValidLatLng = geolocation &&
+      Number.isFinite(geolocation.lat) &&
+      Number.isFinite(geolocation.lng);
+    console.log('[GEO] Extracted from page sources:', JSON.stringify(geolocation));
+    console.log('[GEO] Has valid lat+lng:', hasValidLatLng);
+
+    if (!hasValidLatLng) {
+      console.log('⚠️ [scrap_999] No valid GPS in page sources — querying Nominatim OSM geocoder');
+
       try {
-        const { getGeolocation } = require('../../utils/mapmdgeoloc');
-        const geoAddress = buildGeoAddress(parsedLocation);
-        console.log('[GEO ADDRESS] Final address:', geoAddress);
-        const coords = await getGeolocation(parsedLocation);
-        if (coords) {
+        const { geocodeWithFallback } = require('../../utils/geolocNominatim');
+
+        // geocodeWithFallback handles the multi-attempt strategy internally:
+        //   1. Full street address (buildGeoAddress)
+        //   2. Street without prefix, with/without number
+        //   3. Sector + city centroid
+        const coords = await geocodeWithFallback(parsedLocation);
+
+        if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
           geolocation = {
-            lat: coords.latitude,
-            lng: coords.longitude,
+            lat: coords.lat,
+            lng: coords.lng,
           };
-          console.log('[GEO RESULT] Coordinates:', geolocation);
+          console.log('[GEO RESULT] ✅ Using Nominatim coordinates:', JSON.stringify(geolocation));
+        } else {
+          // Nominatim failed — set to null (don't preserve invalid data)
+          console.log('[GEO RESULT] ❌ Nominatim returned no coordinates — setting geolocation to null');
+          geolocation = null;
         }
       } catch (geoErr) {
-        console.error('⚠️ [scrap_999] map.md fallback failed:', geoErr.message);
+        console.error('⚠️ [scrap_999] Nominatim fallback failed:', geoErr.message);
+        // On error, set to null (don't preserve invalid data)
+        geolocation = null;
       }
+    } else {
+      console.log('[GEO] ✅ Using coordinates from page sources:', JSON.stringify(geolocation));
     }
+    console.log('[GEO PAYLOAD]', JSON.stringify(geolocation));
 
     // ── 10. Construiește obiectul de returnat ──────────────────
     const result = {
@@ -804,6 +1129,7 @@ ${phoneNr ? `📞 Telefon: ${phoneNr}` : ''}
       price: extracted.price,
       priceNumeric, // BUG #8: numeric price for filter URL
       offerType: extracted.offerType,
+      offerTypeId: extracted.offerTypeId, // BUG FIX v3.0: numeric ID for filter URL
       regionText: extracted.location,
       // BUG #2, #3 FIXED: region array with correct order
       region: getLocationArrayForFilter(parsedLocation),
@@ -830,6 +1156,24 @@ ${phoneNr ? `📞 Telefon: ${phoneNr}` : ''}
       living: normalizedLiving,             // boolean | null
       developer: normalizedDeveloper,       // string | null
     };
+
+    // ══════════════════════════════════════════════════════════════
+    // DETAILED DEBUG LOGS (BUG FIX v3.0)
+    // ══════════════════════════════════════════════════════════════
+    console.log('[DEBUG v3.0] === SCRAPER RESULT DEBUG ===');
+    console.log('[DEBUG v3.0] Extracted owner phone:', phoneNr || 'NONE');
+    console.log('[DEBUG v3.0] Final geolocation:', JSON.stringify(geolocation));
+    console.log('[DEBUG v3.0] Final heating ID:', normalizedHeating);
+    console.log('[DEBUG v3.0] Final offer type:', extracted.offerType, '(ID:', extracted.offerTypeId + ')');
+    console.log('[DEBUG v3.0] Final building:', extracted.building);
+    console.log('[DEBUG v3.0] Final balcony ID:', normalizedBalcony);
+    console.log('[DEBUG v3.0] Final condition:', normalizedCondition);
+    console.log('[DEBUG v3.0] Final rooms:', extracted.rooms);
+    console.log('[DEBUG v3.0] Final area:', extracted.area);
+    console.log('[DEBUG v3.0] Final floor:', floorParsed.floor, '/', floorParsed.totalFloors);
+    console.log('[DEBUG v3.0] ============================');
+
+    console.log('[HEATING FINAL]', result.heating);
 
     console.log('✅ [scrap_999] Date extrase cu succes');
     console.log('📝 Output formatat:\n', formattedText);

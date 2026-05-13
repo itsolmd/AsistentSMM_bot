@@ -8,8 +8,95 @@ const { removeWatermark } = require("../../utils/dewatermarking");
 const { getFilter } = require("../../utils/filters");
 const { normalizeUrl, safeUrl, sanitizeText } = require("../../utils/telegramMediaSafe");
 const { uploadImageToStrapi } = require("../../utils/uploadImagStrapi");
-//const { getCoordinates } = require('../../utils/mapmdgeoloc');               // geoloc map
+const { geocodeWithFallback } = require('../../utils/geolocNominatim');      // Nominatim OSM geocoder
 // const { scrap_999, GeoLoc } = require("../../webscrape/websites/999");
+
+/**
+ * normalizeGeolocation(geo)
+ *
+ * Validates and normalizes a geolocation object for Strapi's geolocation component.
+ * Strapi expects: { lat: number, lon: number, bearing: 0, pitch: 0, zoom: 0 }
+ *
+ * INPUT: Accepts any coordinate key naming:
+ *   { lat, lng } | { lat, lon } | { latitude, longitude } | { lat, lng, lon }
+ *
+ * OUTPUT: Strapi-compatible { lat, lon, bearing, pitch, zoom }
+ * (Strapi's geolocation component uses `lon` internally, NOT `lng`.)
+ *
+ * Returns `null` if coordinates are missing, invalid, or out of range.
+ * This prevents Invalid LatLng crashes in frontend Leaflet rendering.
+ *
+ * @param {Object|null} geo - Raw geolocation object
+ * @returns {Object|null} Normalized Strapi geolocation or null
+ */
+function normalizeGeolocation(geo) {
+  if (!geo || typeof geo !== 'object') {
+    console.log('[GEO RAW] No geo object');
+    return null;
+  }
+
+  // ── SAFE EXTRACTION: Reject null/undefined BEFORE Number() conversion ──
+  // Number(null) = 0, which is a valid coordinate (equator/null island).
+  // We must catch null/undefined explicitly to prevent false positives.
+  const rawLat = geo.lat ?? geo.latitude;
+  const rawLng = geo.lng ?? geo.lon ?? geo.longitude;
+
+  console.log('[GEO RAW] Input:', JSON.stringify(geo));
+  console.log('[GEO RAW] Extracted — rawLat:', rawLat, 'rawLng:', rawLng);
+
+  // ── NULL/UNDEFINED CHECK: Must happen BEFORE Number() ──
+  if (rawLat == null || rawLng == null) {
+    console.log('[GEO VALIDATION] ❌ Null/undefined — rawLat:', rawLat, 'rawLng:', rawLng);
+    return null;
+  }
+
+  const lat = Number(rawLat);
+  const lng = Number(rawLng);
+
+  console.log('[GEO NORMALIZED] lat:', lat, 'lng:', lng);
+
+  // ── VALIDATION: Must be valid finite numbers ──
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    console.log('[GEO VALIDATION] ❌ Not finite — lat:', lat, 'lng:', lng);
+    return null;
+  }
+
+  // ── VALIDATION: Must be within valid geographic ranges ──
+  if (lat < -90 || lat > 90) {
+    console.log('[GEO VALIDATION] ❌ Lat out of range — lat:', lat);
+    return null;
+  }
+  if (lng < -180 || lng > 180) {
+    console.log('[GEO VALIDATION] ❌ Lng out of range — lng:', lng);
+    return null;
+  }
+
+  // ── VALIDATION: Must not be placeholder values ──
+  // (999.md sometimes returns { lat: 1, lng: null } which is truthy but invalid)
+  if (lat === 0 && lng === 0) {
+    console.log('[GEO VALIDATION] ❌ Zero/zero placeholder');
+    return null;
+  }
+  if (Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01) {
+    console.log('[GEO VALIDATION] ❌ Near-zero placeholder — lat:', lat, 'lng:', lng);
+    return null;
+  }
+
+  console.log('[GEO VALIDATION] ✅ Valid — lat:', lat, 'lng:', lng);
+  // BUG FIX: Strapi's geolocation component uses `lng` key, NOT `lon`.
+  // The `lon` alias is included for backwards compatibility with any
+  // existing data that may have been stored with `lon` key.
+  const result = {
+    lat,
+    lng,
+    lon: lng, // Alias for backward compatibility
+    bearing: geo.bearing ?? 0,
+    pitch: geo.pitch ?? 0,
+    zoom: geo.zoom ?? 0,
+  };
+  console.log('[GEO PAYLOAD]', JSON.stringify(result));
+  return result;
+}
 
 //functie care ia un field si il trece prin obiectul cu ids pina gaseste match.
 //daca este match, seteaza-l.
@@ -293,38 +380,6 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
 
 
 
-/////start geolocatia pri fuctie aparte din map.md (mapmdgeoloc.js)
-
-
-
-// (async () => {
-//     // Exemplu de URL (poți înlocui cu un URL dinamic sau primit ca input)
-//     //const url = "https://999.md/ro/100115627"; // URL-ul anunțului
-
-//     // Apelează funcția de scraping
-//     const objectToSend = await scrap_999(null, url);
-
-//     // Verifică dacă obiectul returnat conține date valide
-//     if (objectToSend) {
-//         console.log("Obiectul returnat de scrap_999:", objectToSend);
-
-//         // Extrage geolocația din obiect
-//         if (objectToSend.geolocation) {
-//             const { lat, lng } = objectToSend.geolocation;
-//             console.log("Geolocația extrasă:", { lat, lng });
-//         } else {
-//             console.error("Geolocația nu a fost găsită în obiectul returnat.");
-//         }
-
-//         // Extrage alte date din obiect (opțional)
-//         console.log("Titlul anunțului:", objectToSend.title);
-//         console.log("Prețul:", objectToSend.price);
-//         console.log("Descrierea:", objectToSend.description);
-//     } else {
-//         console.error("Nu s-au putut extrage datele de pe site.");
-//     }
-// })();
-// /// end extract geolocatia pri fuctie aparte din map.md (mapmdgeoloc.js)
 
 
 
@@ -334,6 +389,42 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
     data.living.toLowerCase().includes("living");
   console.log("[postToPremier] Living raw:", data.living);
   console.log("[postToPremier] Living boolean:", hasLiving);
+
+  // ── GEOLOCATION FALLBACK: Try to fetch coordinates if missing or invalid ──
+  // BUG FIX v4.0: Check for VALID coordinates, not just truthy geolocation object.
+  // 999.md sometimes returns { lat: 1, lng: null } which is truthy but invalid.
+  const currentGeo = normalizeGeolocation(data.geolocation);
+  const hasValidGeo = currentGeo !== null;
+
+  if (!hasValidGeo && data.parsedLocation) {
+    console.log("🌐 [postToPremier] Geolocation missing or invalid — attempting Nominatim OSM geocoder via parsedLocation:",
+      JSON.stringify(data.parsedLocation));
+    if (data.geolocation) {
+      console.log("⚠️ [postToPremier] Existing geolocation was invalid, will be replaced:",
+        JSON.stringify(data.geolocation));
+    }
+    try {
+      const coords = await geocodeWithFallback(data.parsedLocation);
+      if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
+        console.log('[GEO NORMALIZED] Nominatim returned:', JSON.stringify(coords));
+        data.geolocation = normalizeGeolocation(coords);
+        console.log("✅ [postToPremier] Geolocation resolved via Nominatim OSM:", JSON.stringify(data.geolocation));
+      } else {
+        console.log("⚠️ [postToPremier] Nominatim returned no coordinates for:", JSON.stringify(data.parsedLocation));
+        data.geolocation = null;
+      }
+    } catch (geoErr) {
+      console.error("❌ [postToPremier] Nominatim geolocation fetch failed:", geoErr.message);
+      data.geolocation = null;
+    }
+  } else if (hasValidGeo) {
+    // Normalize existing valid geolocation to Strapi format (lng → lon, add bearing/pitch/zoom)
+    data.geolocation = currentGeo;
+    console.log("✅ [postToPremier] Geolocation already present and valid:", JSON.stringify(data.geolocation));
+  } else {
+    console.log("⚠️ [postToPremier] No parsedLocation available for geolocation lookup — keeping null");
+    data.geolocation = null;
+  }
 
   let dataToSend = {};
   if (canonicalType === "apartments") {
@@ -365,16 +456,53 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
         ),
         // ── HEATING with smart fallback based on building/fund type ──
         heating: await (async () => {
-          // 1. Try real heating type first
-          if (data.heating) {
-            const heatingId = await matchFieldId(ctx, data.heating, "apartament-heatings");
-            if (heatingId) {
-              console.log("[HEATING] Real heating type found:", data.heating, "→ ID:", heatingId);
-              return heatingId;
+          // Helper: try multiple possible names for a heating type
+          const tryMatchHeating = async (names) => {
+            for (const name of names) {
+              try {
+                const id = await matchFieldId(ctx, name, "apartament-heatings");
+                if (id) {
+                  console.log(`[HEATING] Matched "${name}" → ID:`, id);
+                  return id;
+                }
+              } catch (e) {
+                console.warn(`[HEATING] matchFieldId error for "${name}":`, e.message);
+              }
+            }
+            return null;
+          };
+
+          // Map numeric heating IDs from scraper to possible string names for DB lookup
+          const heatingNameVariants = {
+            1: ["Autonomă", "Autonoma", "Încălzire autonomă", "Incălzire autonomă", "Autonomous"],
+            2: ["Centralizată", "Centralizata", "Încălzire centralizată", "Incălzire centralizata", "Centralized"],
+          };
+
+          // 1. Try real heating type first (from scraper numeric ID)
+          if (data.heating !== null && data.heating !== undefined) {
+            const variants = typeof data.heating === 'number'
+              ? heatingNameVariants[data.heating]
+              : null;
+
+            if (variants) {
+              const heatingId = await tryMatchHeating(variants);
+              if (heatingId) {
+                console.log("[HEATING] Real heating type found:", data.heating, "→ ID:", heatingId);
+                return heatingId;
+              }
+            }
+
+            // Also try the raw string value directly
+            if (typeof data.heating === 'string') {
+              const rawId = await matchFieldId(ctx, data.heating, "apartament-heatings");
+              if (rawId) {
+                console.log("[HEATING] Matched raw string:", data.heating, "→ ID:", rawId);
+                return rawId;
+              }
             }
           }
 
-          // 2. Fallback: infer from building type when heating is missing
+          // 2. Fallback: infer from building type when heating is missing or unmatched
           if (data.building) {
             const normalizedBuilding = data.building
               ?.toLowerCase()
@@ -388,7 +516,7 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
               normalizedBuilding.includes("constructii noi") ||
               normalizedBuilding.includes("bloc nou")
             ) {
-              const autoId = await matchFieldId(ctx, "Autonomă", "apartament-heatings");
+              const autoId = await tryMatchHeating(heatingNameVariants[1]);
               console.log("[HEATING FALLBACK] Selected heating: AUTONOMOUS — new building detected → ID:", autoId);
               return autoId;
             }
@@ -396,9 +524,10 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
             // Secondary market → Centralized
             if (
               normalizedBuilding.includes("fond secundar") ||
-              normalizedBuilding.includes("secundar")
+              normalizedBuilding.includes("secundar") ||
+              normalizedBuilding.includes("bloc secundar")
             ) {
-              const centId = await matchFieldId(ctx, "Centralizată", "apartament-heatings");
+              const centId = await tryMatchHeating(heatingNameVariants[2]);
               console.log("[HEATING FALLBACK] Selected heating: CENTRALIZED — secondary market detected → ID:", centId);
               return centId;
             }
@@ -443,8 +572,7 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
         thumbnails: uploadedImageIds,
         sector: sector,
         suburb: suburbie,
-        // BUG #9 FIXED: Use real GPS from scraper if available, fallback only if missing
-        geolocation: data.geolocation || { lat: 46.86513324840075, lng: 28.99087267849402 },
+        geolocation: data.geolocation,
         infos: await (async () => {
           let filterUrl = "";
           try {
@@ -628,7 +756,7 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
     dataToSend = {
       data: {
         price: parsePriceToNumber(data.price),
-        geolocation: data.geolocation || { lat: 46.86513324840075, lng: 28.99087267849402 },
+        geolocation: data.geolocation || null,
         // BUG v2.1 FIXED: Removed "images" field — not in Strapi schema
         // BUG FIX STRAPI v5: Simple array format instead of { connect: [...] }
         thumbnails: uploadedImageIds,

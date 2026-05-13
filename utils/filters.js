@@ -540,21 +540,104 @@ const getFilter = async (adData, ctx) => {
     const areaNum = safeNumber(adData.area, 50);
     console.log("🔍 [getFilter] Area (safe numeric):", adData.area, "→", areaNum);
 
-    const init = `https://999.md/ro/list/real-estate/apartments-and-rooms?hide_duplicates=no&applied=1&show_all_checked_childrens=no&ef=33,32,31,30,2307,1073,2203,1074,1191,1192&o_33_1=776&eo=${
+    // ══════════════════════════════════════════════════════════════
+    // FILTER URL PARAMETER HELPERS (BUG FIX v3.0)
+    // ══════════════════════════════════════════════════════════════
+
+    // ── OFFER TYPE (feature 33) ──────────────────────────────────
+    // 776 = Vând, 779 = Închiriez, 777 = Cumpăr, 778 = Schimb
+    const offerTypeId = adData.offerTypeId || 776;
+    console.log("🔍 [getFilter] Offer type ID:", offerTypeId);
+
+    // ── HEATING (feature 2203) ───────────────────────────────────
+    // Map Strapi heating ID (1=Autonomă, 2=Centralizată) to 999.md filter option ID
+    // TODO: Verify these option IDs by querying 999.md API
+    const getHeatingFilterOptionId = (heatingId) => {
+      if (heatingId === 1) return 'TODO_AUTONOMOUS_OPTION_ID';  // Autonomă
+      if (heatingId === 2) return 'TODO_CENTRALIZED_OPTION_ID'; // Centralizată
+      return null;
+    };
+    const heatingOptionId = adData.heating != null ? getHeatingFilterOptionId(adData.heating) : null;
+    console.log("🔍 [getFilter] Heating ID:", adData.heating, "→ filter option:", heatingOptionId);
+
+    // ── BALCONY (feature 1192) ───────────────────────────────────
+    // Map Strapi balcony ID (1=Da, 2=Nu) to 999.md filter option ID
+    // TODO: Verify these option IDs by querying 999.md API
+    const getBalconyFilterOptionId = (balconyId) => {
+      if (balconyId === 1) return 'TODO_YES_OPTION_ID';  // Da/Balcon
+      if (balconyId === 2) return 'TODO_NO_OPTION_ID';   // Nu/Fără balcon
+      return null;
+    };
+    const balconyOptionId = adData.balcony != null ? getBalconyFilterOptionId(adData.balcony) : null;
+    console.log("🔍 [getFilter] Balcony ID:", adData.balcony, "→ filter option:", balconyOptionId);
+
+    // ── BUILDING TYPE ────────────────────────────────────────────
+    // Normalize building string for comparison (handle object {ro: "..."} or string)
+    let buildingStr = '';
+    if (typeof adData.building === 'string') {
+      buildingStr = adData.building;
+    } else if (adData.building?.ro) {
+      buildingStr = adData.building.ro;
+    } else {
+      buildingStr = String(adData.building || '');
+    }
+    const isNewBuilding = buildingStr.toLowerCase().includes('construcţii noi') ||
+                          buildingStr.toLowerCase().includes('constructii noi') ||
+                          buildingStr.toLowerCase().includes('bloc nou');
+    const buildingOptionId = isNewBuilding ? "19108" : "19109";
+    console.log("🔍 [getFilter] Building:", buildingStr, "→ isNew:", isNewBuilding, "→ option:", buildingOptionId);
+
+    // ── CONDITION ────────────────────────────────────────────────
+    // Normalize condition string for comparison
+    let conditionStr = '';
+    if (typeof adData.condition === 'string') {
+      conditionStr = adData.condition;
+    } else if (adData.condition?.ro) {
+      conditionStr = adData.condition.ro;
+    } else {
+      conditionStr = String(adData.condition || '');
+    }
+    const isWhiteVariant = conditionStr.toLowerCase().includes('variantă albă') ||
+                           conditionStr.toLowerCase().includes('varianta alba') ||
+                           conditionStr.toLowerCase().includes('fără reparaţie') ||
+                           conditionStr.toLowerCase().includes('fara reparatie');
+    const conditionOptionId = isWhiteVariant ? "925" : "916";
+    console.log("🔍 [getFilter] Condition:", conditionStr, "→ isWhiteVariant:", isWhiteVariant, "→ option:", conditionOptionId);
+
+    // ── BUILD FILTER URL ─────────────────────────────────────────
+    let init = `https://999.md/ro/list/real-estate/apartments-and-rooms?hide_duplicates=no&applied=1&show_all_checked_childrens=no&ef=33,32,31,30,2307,1073,2203,1074,1191,1192&o_33_1=${offerTypeId}&eo=${
       region.map(r => r.value).join(',')
      }&o_32_9_${region[0].value}_${region[1].value}=${
       region[2].value
      }&from_6_2=${Math.max(0, priceNum - 5000)}&to_6_2=${priceNum + 5000}&r_31_2_unit=eur&o_30_241=${getNumberOfRoomsFromString(
       adData.rooms
-     )}&o_2307_852=${
-      adData.building === "Construcţii noi" ? "19108" : "19109"
-     }&o_1074_253=${
-      adData.condition === "Variantă albă" ? "925" : "916"
-     }&from_1073_244=${Math.max(0, areaNum - 5)}&to_1073_244=${areaNum + 5}&r_1073_244_unit=m2&o_1191_248=${
+     )}&o_2307_852=${buildingOptionId}&o_1074_253=${conditionOptionId}&from_1073_244=${Math.max(0, areaNum - 5)}&to_1073_244=${areaNum + 5}&r_1073_244_unit=m2&o_1191_248=${
       `${floorNum !== 1 ? getNumberOfFloorsFromString(floorNum - 1) + "," : ""}` +
       getNumberOfFloorsFromString(floorNum) +
       `${floorNum !== 25 ? "," + getNumberOfFloorsFromString(floorNum + 1) : ""}`
      }`;
+
+    // Append heating filter if option ID is known
+    if (heatingOptionId && !heatingOptionId.startsWith('TODO_')) {
+      init += `&o_2203_XXX=${heatingOptionId}`;
+    }
+
+    // Append balcony filter if option ID is known
+    if (balconyOptionId && !balconyOptionId.startsWith('TODO_')) {
+      init += `&o_1192_XXX=${balconyOptionId}`;
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // DEBUG LOG: Final filter URL (BUG FIX v3.0)
+    // ══════════════════════════════════════════════════════════════
+    console.log("[DEBUG v3.0] === FILTER URL DEBUG ===");
+    console.log("[DEBUG v3.0] Offer type ID:", offerTypeId);
+    console.log("[DEBUG v3.0] Heating ID:", adData.heating, "→ filter option:", heatingOptionId);
+    console.log("[DEBUG v3.0] Balcony ID:", adData.balcony, "→ filter option:", balconyOptionId);
+    console.log("[DEBUG v3.0] Building option:", buildingOptionId);
+    console.log("[DEBUG v3.0] Condition option:", conditionOptionId);
+    console.log("[DEBUG v3.0] Final filter URL:", init);
+    console.log("[DEBUG v3.0] =======================");
 
     return init;
   } catch (error) {

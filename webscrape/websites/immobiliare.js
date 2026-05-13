@@ -70,35 +70,35 @@ const scrap_immobiliare = async (ctx, url) => {
       .replace(",", "")
   );
 
-  //linkul la google maps
-  const googleMapsUrl = cheerio
-    .load($(".property-location").html())("a")
-    .attr("href");
-  const parsedUrl = new URL("https:" + googleMapsUrl);
-  const queryParams = querystring.parse(parsedUrl.searchParams.toString());
-  const address = queryParams.q;
-  if (!address) {
-    throw new Error("Address parameter 'q' not found in the URL.");
+  // ═══════════════════════════════════════════════════════════════
+  // GEOLOCATION — Extract from map widget data attributes
+  // Normalized to { lat, lng } format with safe validation.
+  // ═══════════════════════════════════════════════════════════════
+  const rawLat = cheerio.load(root_post)("#js-ad-map").attr("data-marker-lat");
+  const rawLng = cheerio.load(root_post)("#js-ad-map").attr("data-marker-lng");
+
+  console.log('[GEO RAW] lat:', rawLat, 'lng:', rawLng);
+
+  const lat = Number(rawLat);
+  const lng = Number(rawLng);
+
+  const hasValidGeo = Number.isFinite(lat) && Number.isFinite(lng) &&
+    lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+
+  if (hasValidGeo) {
+    objectToSend.geolocation = { lat, lng };
+    console.log('[GEO VALIDATION] ✅ Valid — lat:', lat, 'lng:', lng);
+  } else {
+    // Fallback to Chișinău city center
+    objectToSend.geolocation = { lat: 47.017461, lng: 28.846762 };
+    console.log('[GEO VALIDATION] ❌ Invalid or missing — using fallback Chișinău center');
   }
-  const encodedAddress = encodeURIComponent(address);
-  const geocodingUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodedAddress}&key=${process.env.GOOGLE_MAPS_KEY}`;
-  return console.log(geocodingUrl);
+  console.log('[GEO PAYLOAD]', JSON.stringify(objectToSend.geolocation));
 
   const views_element = $(
     ".adPage__aside__stats__views.not-marketplace"
   ).text();
   objectToSend.region = [...region];
-
-  const geolocation = {
-    lat: cheerio.load(root_post)("#js-ad-map").attr("data-marker-lat"),
-    lng: cheerio.load(root_post)("#js-ad-map").attr("data-marker-lng"),
-  };
-  objectToSend.geolocation = geolocation;
-
-  if (!objectToSend.geolocation.lat) {
-    objectToSend.geolocation.lat = 47.017461;
-    objectToSend.geolocation.lng = 28.846762;
-  }
 
   //haltura
   var images = [];

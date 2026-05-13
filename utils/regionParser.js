@@ -313,21 +313,46 @@ function buildGeoAddress(parsed) {
     return 'Chișinău, Moldova';
   }
 
-  // Normalize street prefix for clean geocoding
-  const cleanStreet = parsed.street ? normalizeStreetPrefix(parsed.street) : null;
+  // ── Normalize street prefix ──────────────────────────────────
+  // Handle Romanian: "strada Ialoveni" → "str. Ialoveni"
+  // Handle Russian:  "ул. Каля Ешилор" → "str. Calea Ieșilor" (prefix only)
+  // Handle no prefix: "Tudor Vladimirescu" → "Tudor Vladimirescu"
+  let normalizedStreet = parsed.street
+    ?.replace(/^strada\s+/i, "str. ")
+    ?.replace(/^str\s+/i, "str. ")
+    ?.replace(/^улица\s+/i, "str. ")   // Russian full form
+    ?.replace(/^ул\.?\s*/i, "str. ")   // Russian abbreviation (ул. or ул)
+    ?.trim();
 
+  // Also produce a version WITHOUT any street prefix for map.md
+  const streetWithoutPrefix = normalizedStreet
+    ?.replace(/^(str\.|strada)\s+/i, '')
+    ?.trim();
+
+  // Combine street and number into a single item: "str. Ialoveni 136"
+  const streetLine = normalizedStreet
+    ? `${normalizedStreet}${parsed.streetNumber ? ` ${parsed.streetNumber}` : ""}`
+    : null;
+
+  // Version without prefix: "Calea Ieșilor 6" (sometimes map.md prefers this)
+  const streetNoPrefixLine = streetWithoutPrefix
+    ? `${streetWithoutPrefix}${parsed.streetNumber ? ` ${parsed.streetNumber}` : ""}`
+    : null;
+
+  // ── Build Romanian-style address (recommended for map.md) ────
   const parts = [
-    cleanStreet,
-    parsed.streetNumber,
+    streetLine,
     parsed.sector,
     parsed.city,
     'Moldova',
   ].filter(Boolean);
 
   // If we have street-level data, use full address
-  if (cleanStreet || parsed.streetNumber) {
+  if (streetLine) {
     const geoAddress = parts.join(', ');
-    console.log('[GEO ADDRESS] Final address:', geoAddress);
+    console.log('[GEO ADDRESS] Primary address (with prefix):', geoAddress);
+    console.log('[GEO ADDRESS] Alternative address (no prefix):',
+      [streetNoPrefixLine, parsed.sector, parsed.city, 'Moldova'].filter(Boolean).join(', '));
     return geoAddress;
   }
 
