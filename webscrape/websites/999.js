@@ -204,7 +204,9 @@ const scrap_999 = async (ctx, url) => {
       }
 
       // ── Băi (Grup sanitar) ──────────────────────────────────
-      let bathrooms = 'N/A';
+      // Fallback: if not found or invalid, default to 1
+      // Never returns 'N/A' — always a valid number for Strapi
+      let bathrooms = 1;
       const bathRaw = extractByLabel('Grup sanitar', bodyText);
       if (bathRaw) {
         const n = extractNumber(bathRaw);
@@ -1011,6 +1013,23 @@ const scrap_999 = async (ctx, url) => {
     console.log("[ADDRESS PARSER] Parsed:", parsedLocation);
     const formattedLocation = formatLocation(parsedLocation, true);
 
+    // ── FALLBACK: If location parsing failed (no city found), use hardcoded address ──
+    // This prevents flow interruption when the page's address selector fails or
+    // returns an unparseable string. The bot continues with a valid default address.
+    if (!parsedLocation || !parsedLocation.city) {
+      console.warn('⚠️ [scrap_999] Location parsing failed — using hardcoded fallback address: Chișinău, Botanica, bd. Cuza Vodă, 17/1');
+      parsedLocation = {
+        city: 'Chișinău',
+        sector: 'Botanica',
+        municipality: 'Chișinău mun.',
+        street: 'bd. Cuza Vodă',
+        streetNumber: '17/1',
+        original: 'Chișinău mun., Chișinău, Botanica, bd. Cuza Vodă, 17/1'
+      };
+      formattedLocation = formatLocation(parsedLocation, true);
+      console.log('[ADDRESS FALLBACK] Using hardcoded location:', formattedLocation);
+    }
+
     // ── 5. Formatează ID-ul ────────────────────────────────────
     const formatId = extracted.advertId
       ? `DB_Ap${extracted.advertId}`
@@ -1046,7 +1065,7 @@ const scrap_999 = async (ctx, url) => {
 🛏️ Dormitoare: ${extracted.rooms}
 📐 Suprafață: ${extracted.area} m²
 🏢 Etaj: ${floorParsed.floor || extracted.floor}/${floorParsed.totalFloors || extracted.totalFloors}
-🚽 Băi: ${extracted.bathrooms}
+🚽 Băi: ${extracted.bathrooms || 1}
 🏗️ Bloc: ${extracted.building}
 💰 Preț: ${extracted.price}
 ${phoneNr ? `📞 Telefon: ${phoneNr}` : ''}
@@ -1106,14 +1125,17 @@ ${phoneNr ? `📞 Telefon: ${phoneNr}` : ''}
           };
           console.log('[GEO RESULT] ✅ Using Nominatim coordinates:', JSON.stringify(geolocation));
         } else {
-          // Nominatim failed — set to null (don't preserve invalid data)
-          console.log('[GEO RESULT] ❌ Nominatim returned no coordinates — setting geolocation to null');
-          geolocation = null;
+          // Nominatim failed — use hardcoded fallback coordinates (Chișinău, Buiucani center)
+          // This ensures the flow continues without interruption. The bot never returns null
+          // or throws for missing geolocation — it always has a valid fallback.
+          console.log('[GEO RESULT] ❌ Nominatim returned no coordinates — using hardcoded fallback (Chișinău, Buiucani)');
+          geolocation = { lat: 47.037, lng: 28.819 };
         }
       } catch (geoErr) {
         console.error('⚠️ [scrap_999] Nominatim fallback failed:', geoErr.message);
-        // On error, set to null (don't preserve invalid data)
-        geolocation = null;
+        // Use hardcoded fallback coordinates — never return null
+        console.log('[GEO RESULT] Using hardcoded fallback coordinates (Chișinău, Buiucani) after Nominatim error');
+        geolocation = { lat: 47.037, lng: 28.819 };
       }
     } else {
       console.log('[GEO] ✅ Using coordinates from page sources:', JSON.stringify(geolocation));

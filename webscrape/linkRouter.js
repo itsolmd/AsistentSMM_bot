@@ -18,7 +18,36 @@ const { sendMessageFromPremier } = require("../utils/message_main_premier");
 /* Helpers                                                   */
 /*───────────────────────────────────────────────────────────*/
 
-const returnPremierOptions = async (ctx) => {
+/**
+ * persistSessionDataToMongo(ctx, db)
+ *
+ * Persists ctx.session.data to MongoDB as pendingAdData for resilience
+ * against Telegraf's in-memory session loss. Called immediately after
+ * session.data is set, so the MongoDB copy is always available for
+ * subsequent callback queries (e.g., "Post Premier").
+ *
+ * @param {Object} ctx - Telegraf context
+ * @param {Object} db  - MongoDB database instance
+ */
+async function persistSessionDataToMongo(ctx, db) {
+  if (!db || !ctx?.session?.data || typeof ctx.session.data !== 'object' || Object.keys(ctx.session.data).length === 0) {
+    console.warn('[PERSIST] Skipping MongoDB persist — no db or session.data is empty');
+    return false;
+  }
+  try {
+    await db.collection("users").updateOne(
+      { telegramChatID: ctx.chat.id.toString() },
+      { $set: { pendingAdData: JSON.parse(JSON.stringify(ctx.session.data)) } }
+    );
+    console.log('[PERSIST] ✅ session.data saved to MongoDB for user', ctx.chat.id);
+    return true;
+  } catch (persistErr) {
+    console.error('[PERSIST] ❌ Failed to save session.data to MongoDB:', persistErr.message);
+    return false;
+  }
+}
+
+const returnPremierOptions = async (ctx, db) => {
   try {
     const slug = ctx.message.text.trim().split("/").slice(-2).join("/");
     console.log("🔍 [returnPremierOptions] Fetching slug:", slug);
@@ -35,6 +64,10 @@ const returnPremierOptions = async (ctx) => {
     );
 
     ctx.session.data = data.data;
+    console.log('[returnPremierOptions] session.data stored — keys:', Object.keys(ctx.session.data || {}).join(', '));
+
+    // ── PERSIST to MongoDB for resilience across callback queries ──
+    await persistSessionDataToMongo(ctx, db);
 
     await ctx.replyWithMediaGroup(sendMessageFromPremier(ctx));
     await ctx.reply(
@@ -49,7 +82,7 @@ const returnPremierOptions = async (ctx) => {
   }
 };
 
-const returnInfoInChat = async (adData, ctx, userAdId) => {
+const returnInfoInChat = async (adData, ctx, userAdId, db) => {
   if (!adData) return ctx.reply("Nu am putut extrage datele.");
 
   /*─── DEBUG: Log raw images before any sanitization ────────────*/
@@ -69,7 +102,21 @@ const returnInfoInChat = async (adData, ctx, userAdId) => {
     ──────────────────────────────────────────────────────────────*/
   adData.images = sanitizeImages(adData.images);
 
-  ctx.session.data = adData;
+  // ── DEEP CLONE: Store a copy of the data in session to prevent any
+  //    cross-context mutation issues between text handler and callback
+  //    query contexts. The Telegraf session middleware may persist the
+  //    object reference, and any subsequent modifications to `adData`
+  //    (e.g., in media group fallback) could corrupt the session copy.
+  ctx.session.data = JSON.parse(JSON.stringify(adData));
+  console.log('[linkRouter] session.data stored — keys:', Object.keys(ctx.session.data).join(', '));
+
+  // ── IMMEDIATE PERSIST to MongoDB: Save pendingAdData right after
+  //    setting session.data. This ensures the data survives even if
+  //    Telegraf's in-memory session store loses it before the text
+  //    handler's own persistence code runs (index.js lines 202-217).
+  //    The MongoDB copy serves as a resilience fallback for callback
+  //    queries like "Post Premier" → "remove_watermark_no".
+  await persistSessionDataToMongo(ctx, db);
 
   /*─── FAILSAFE MODE ────────────────────────────────────────────
     If after sanitization we have ZERO valid images:
@@ -143,7 +190,7 @@ const returnInfoInChat = async (adData, ctx, userAdId) => {
 /* Router principal                                          */
 /*───────────────────────────────────────────────────────────*/
 
-const linkRouter = async (ctx, userAdId) => {
+const linkRouter = async (ctx, userAdId, db) => {
   let urlObj;
   try {
     urlObj = new URL(ctx.message.text.trim());
@@ -158,19 +205,19 @@ const linkRouter = async (ctx, userAdId) => {
   try {
     if (["999.md", "m.999.md"].includes(host)) {
       const adData = await scrap_999(ctx, ctx.message.text.trim());
-      return returnInfoInChat(adData, ctx, userAdId);
+      return returnInfoInChat(adData, ctx, userAdId, db);
 
     } else if (host === "premierimobil.md") {
       ctx.session.imobilType = ctx.message.text.trim().split("/")[4];
-      return returnPremierOptions(ctx);
+      return returnPremierOptions(ctx, db);
 
     } else if (host === "immobiliare.md") {
       const adData = await scrap_immobiliare(ctx, ctx.message.text.trim());
-      return returnInfoInChat(adData, ctx, userAdId);
+      return returnInfoInChat(adData, ctx, userAdId, db);
 
     } else if (host === "loyal.md") {
       const adData = await parseLoyal(ctx.message.text.trim());
-      return returnInfoInChat(adData, ctx, userAdId);
+      return returnInfoInChat(adData, ctx, userAdId, db);
 
     } else if (host === "mirax.md") {
       return ctx.reply("Parser Mirax.md nu este încă disponibil.");
@@ -185,6 +232,6 @@ const linkRouter = async (ctx, userAdId) => {
   }
 };
 
-module.exports = { linkRouter };
+module.exports = { linkRouter, persistSessionDataToMongo };
 
 

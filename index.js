@@ -196,8 +196,27 @@ bot.on("text", checkUser, async (ctx) => {
 
     const startTime = Date.now();
 
-    // Wrap linkRouter execution (handles all scraping internally)
-    await linkRouter(ctx, userAdId);
+    // ── WRAP linkRouter execution ──
+    // linkRouter now also receives `db` to persist session.data to MongoDB
+    // IMMEDIATELY when it's stored (inside returnInfoInChat). This is the
+    // PRIMARY persistence layer. The code below is a SECONDARY backup.
+    await linkRouter(ctx, userAdId, db);
+
+    // ── BACKUP PERSIST: session.data → MongoDB ──
+    // This is a secondary safety net in case the primary persistence inside
+    // returnInfoInChat/linkRouter did not have a valid `db` reference.
+    if (ctx.session.data && typeof ctx.session.data === 'object' && Object.keys(ctx.session.data).length > 0) {
+      try {
+        await db.collection("users").updateOne(
+          { telegramChatID: ctx.chat.id.toString() },
+          { $set: { pendingAdData: JSON.parse(JSON.stringify(ctx.session.data)) } }
+        );
+        console.log('[PERSIST BACKUP] session.data saved to MongoDB for user', ctx.chat.id);
+      } catch (persistErr) {
+        console.error('[PERSIST BACKUP] Failed to save session.data to MongoDB:', persistErr.message);
+        // Non-blocking: continue even if persistence fails
+      }
+    }
 
     // Record response time
     watchdog.recordResponseTime(Date.now() - startTime);
@@ -217,6 +236,25 @@ bot.action("post_premier", checkUser, async (ctx) => {
     watchdog.recordActivity();
     logger.info("GENERAL", "Post to Premier action triggered");
 
+    // ── PERSIST session.data to MongoDB before asking watermark question ──
+    // CRITICAL: Telegraf's in-memory session store loses session.data between
+    // the text handler (where scraped data is stored) and the watermark answer
+    // callback (remove_watermark_yes/no). This persist bridges that gap.
+    // Without this, session.data is already gone by the time the user answers.
+    if (ctx.session?.data && typeof ctx.session.data === 'object' && Object.keys(ctx.session.data).length > 0) {
+      try {
+        await db.collection("users").updateOne(
+          { telegramChatID: ctx.chat.id.toString() },
+          { $set: { pendingAdData: JSON.parse(JSON.stringify(ctx.session.data)) } }
+        );
+        console.log('[POST_PREMIER] ✅ session.data persisted to MongoDB for watermark flow');
+      } catch (persistErr) {
+        console.error('[POST_PREMIER] ❌ Failed to persist session.data:', persistErr.message);
+      }
+    } else {
+      console.warn('[POST_PREMIER] ⚠️ session.data already empty at post_premier stage — relying on earlier persist from linkRouter');
+    }
+
     // Ask user if they want to remove the watermark
     await ctx.editMessageText(
       "Scoatem watermarkul?",
@@ -231,17 +269,149 @@ bot.action("post_premier", checkUser, async (ctx) => {
   }
 });
 
+/**
+ * restoreSessionDataFromMongo(ctx, db)
+ *
+ * Attempts to restore ctx.session.data from MongoDB (pendingAdData field)
+ * when the in-memory session has lost it. This is a resilience mechanism
+ * for Telegraf's unreliable in-memory session store.
+ *
+ * Enhanced logging:
+ *   - Logs whether the user document was found in MongoDB
+ *   - Logs whether pendingAdData exists and its type/size
+ *   - Logs the exact reason when restore fails
+ *
+ * @param {Object} ctx - Telegraf context
+ * @param {Object} db  - MongoDB database instance
+ * @returns {boolean}  - true if data was restored, false otherwise
+ */
+async function restoreSessionDataFromMongo(ctx, db) {
+  try {
+    // ── DIAGNOSTIC: Check if db is available ──
+    if (!db) {
+      console.error('[RESTORE] ❌ db is null/undefined — cannot query MongoDB');
+      return false;
+    }
+
+    const userIdStr = ctx.chat?.id?.toString() || 'unknown';
+    console.log('[RESTORE] 🔍 Looking up pendingAdData for user:', userIdStr);
+
+    const user = await db.collection("users").findOne(
+      { telegramChatID: userIdStr },
+      { projection: { pendingAdData: 1, telegramChatID: 1 } }
+    );
+
+    // ── DIAGNOSTIC: Log DB lookup result ──
+    if (!user) {
+      console.warn('[RESTORE] ❌ User document NOT FOUND in MongoDB for telegramChatID:', userIdStr);
+      return false;
+    }
+    console.log('[RESTORE] ✅ User document found in MongoDB');
+
+    const hasPendingData = user.pendingAdData !== undefined && user.pendingAdData !== null;
+    console.log('[RESTORE] pendingAdData exists:', hasPendingData);
+    if (hasPendingData) {
+      const dataType = typeof user.pendingAdData;
+      const dataKeys = dataType === 'object' ? Object.keys(user.pendingAdData).join(', ') : 'N/A (not an object)';
+      const dataLength = dataType === 'object' ? Object.keys(user.pendingAdData).length : 'N/A';
+      console.log('[RESTORE] pendingAdData type:', dataType, '| keys count:', dataLength, '| keys:', dataKeys);
+    }
+
+    if (user?.pendingAdData && typeof user.pendingAdData === 'object' && Object.keys(user.pendingAdData).length > 0) {
+      ctx.session.data = JSON.parse(JSON.stringify(user.pendingAdData));
+      console.log('[RESTORE] ✅ session.data restored from MongoDB for user', userIdStr);
+      console.log('[RESTORE] Restored data keys:', Object.keys(ctx.session.data).join(', '));
+      return true;
+    }
+
+    console.warn('[RESTORE] ❌ pendingAdData missing or empty — cannot restore');
+    return false;
+  } catch (err) {
+    console.error('[RESTORE] ❌ Error restoring session.data from MongoDB:', err.message);
+    console.error('[RESTORE] Stack:', err.stack);
+    return false;
+  }
+}
+
 // Handle Yes/No response for watermark removal
 bot.action("remove_watermark_yes", checkUser, async (ctx) => {
-  ctx.editMessageText("Postare in executie dureza pana la 5 sec....");
-  ctx.session.removeWatermark = true;
-  await postToPremier(ctx.session.data, ctx, true);
+  try {
+    ctx.editMessageText("Postare in executie dureza pana la 5 sec....");
+
+    // ── DIAGNOSTIC: Log session data state before posting ──
+    console.log('[remove_watermark_yes] session keys:', Object.keys(ctx.session));
+    console.log('[remove_watermark_yes] session.data type:', typeof ctx.session.data);
+    console.log('[remove_watermark_yes] session.data keys:', ctx.session.data ? Object.keys(ctx.session.data) : 'NO DATA');
+
+    // ── RESILIENCE: Try to restore from MongoDB if session.data is lost ──
+    if (!ctx.session.data || typeof ctx.session.data !== 'object' || Object.keys(ctx.session.data).length === 0) {
+      console.warn('⚠️ [remove_watermark_yes] session.data is empty — attempting MongoDB restore...');
+      const restored = await restoreSessionDataFromMongo(ctx, db);
+      if (!restored) {
+        console.error('❌ [remove_watermark_yes] session.data empty AND MongoDB restore failed — aborting');
+        return ctx.reply('Eroare: datele anunțului s-au pierdut. Trimiteți din nou link-ul.');
+      }
+    }
+
+    ctx.session.removeWatermark = true;
+
+    // ── CLEAN UP: Remove pendingAdData from MongoDB after successful restore ──
+    try {
+      await db.collection("users").updateOne(
+        { telegramChatID: ctx.chat.id.toString() },
+        { $unset: { pendingAdData: "" } }
+      );
+    } catch (cleanupErr) {
+      console.error('[CLEANUP] Failed to remove pendingAdData:', cleanupErr.message);
+      // Non-blocking
+    }
+
+    await postToPremier(ctx.session.data, ctx, true);
+  } catch (error) {
+    watchdog.recordError();
+    logger.error("GENERAL", "Error in remove_watermark_yes action", { error: error.message });
+    await ctx.reply("A apărut o eroare la postare. Încercați din nou.");
+  }
 });
 
 bot.action("remove_watermark_no", checkUser, async (ctx) => {
-  ctx.editMessageText("Se incarca imaginile pe Premierimobil.md va dura pana la 5-6 sec...");
-  ctx.session.removeWatermark = false;
-  await postToPremier(ctx.session.data, ctx, false);
+  try {
+    ctx.editMessageText("Se incarca imaginile pe Premierimobil.md va dura pana la 5-6 sec...");
+
+    // ── DIAGNOSTIC: Log session data state before posting ──
+    console.log('[remove_watermark_no] session keys:', Object.keys(ctx.session));
+    console.log('[remove_watermark_no] session.data type:', typeof ctx.session.data);
+    console.log('[remove_watermark_no] session.data keys:', ctx.session.data ? Object.keys(ctx.session.data) : 'NO DATA');
+
+    // ── RESILIENCE: Try to restore from MongoDB if session.data is lost ──
+    if (!ctx.session.data || typeof ctx.session.data !== 'object' || Object.keys(ctx.session.data).length === 0) {
+      console.warn('⚠️ [remove_watermark_no] session.data is empty — attempting MongoDB restore...');
+      const restored = await restoreSessionDataFromMongo(ctx, db);
+      if (!restored) {
+        console.error('❌ [remove_watermark_no] session.data empty AND MongoDB restore failed — aborting');
+        return ctx.reply('Eroare: datele anunțului s-au pierdut. Trimiteți din nou link-ul.');
+      }
+    }
+
+    ctx.session.removeWatermark = false;
+
+    // ── CLEAN UP: Remove pendingAdData from MongoDB after successful restore ──
+    try {
+      await db.collection("users").updateOne(
+        { telegramChatID: ctx.chat.id.toString() },
+        { $unset: { pendingAdData: "" } }
+      );
+    } catch (cleanupErr) {
+      console.error('[CLEANUP] Failed to remove pendingAdData:', cleanupErr.message);
+      // Non-blocking
+    }
+
+    await postToPremier(ctx.session.data, ctx, false);
+  } catch (error) {
+    watchdog.recordError();
+    logger.error("GENERAL", "Error in remove_watermark_no action", { error: error.message });
+    await ctx.reply("A apărut o eroare la postare. Încercați din nou.");
+  }
 });
 
 //redundant///////

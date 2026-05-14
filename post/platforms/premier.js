@@ -31,8 +31,8 @@ const { geocodeWithFallback } = require('../../utils/geolocNominatim');      // 
  */
 function normalizeGeolocation(geo) {
   if (!geo || typeof geo !== 'object') {
-    console.log('[GEO RAW] No geo object');
-    return null;
+    console.log('[GEO RAW] No geo object — using fallback coordinates');
+    return { lat: 47.037, lng: 28.819, lon: 28.819, bearing: 0, pitch: 0, zoom: 0 };
   }
 
   // ── SAFE EXTRACTION: Reject null/undefined BEFORE Number() conversion ──
@@ -46,8 +46,8 @@ function normalizeGeolocation(geo) {
 
   // ── NULL/UNDEFINED CHECK: Must happen BEFORE Number() ──
   if (rawLat == null || rawLng == null) {
-    console.log('[GEO VALIDATION] ❌ Null/undefined — rawLat:', rawLat, 'rawLng:', rawLng);
-    return null;
+    console.log('[GEO VALIDATION] ❌ Null/undefined — rawLat:', rawLat, 'rawLng:', rawLng, '— using fallback');
+    return { lat: 47.037, lng: 28.819, lon: 28.819, bearing: 0, pitch: 0, zoom: 0 };
   }
 
   const lat = Number(rawLat);
@@ -57,29 +57,29 @@ function normalizeGeolocation(geo) {
 
   // ── VALIDATION: Must be valid finite numbers ──
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    console.log('[GEO VALIDATION] ❌ Not finite — lat:', lat, 'lng:', lng);
-    return null;
+    console.log('[GEO VALIDATION] ❌ Not finite — lat:', lat, 'lng:', lng, '— using fallback');
+    return { lat: 47.037, lng: 28.819, lon: 28.819, bearing: 0, pitch: 0, zoom: 0 };
   }
 
   // ── VALIDATION: Must be within valid geographic ranges ──
   if (lat < -90 || lat > 90) {
-    console.log('[GEO VALIDATION] ❌ Lat out of range — lat:', lat);
-    return null;
+    console.log('[GEO VALIDATION] ❌ Lat out of range — lat:', lat, '— using fallback');
+    return { lat: 47.037, lng: 28.819, lon: 28.819, bearing: 0, pitch: 0, zoom: 0 };
   }
   if (lng < -180 || lng > 180) {
-    console.log('[GEO VALIDATION] ❌ Lng out of range — lng:', lng);
-    return null;
+    console.log('[GEO VALIDATION] ❌ Lng out of range — lng:', lng, '— using fallback');
+    return { lat: 47.037, lng: 28.819, lon: 28.819, bearing: 0, pitch: 0, zoom: 0 };
   }
 
   // ── VALIDATION: Must not be placeholder values ──
   // (999.md sometimes returns { lat: 1, lng: null } which is truthy but invalid)
   if (lat === 0 && lng === 0) {
-    console.log('[GEO VALIDATION] ❌ Zero/zero placeholder');
-    return null;
+    console.log('[GEO VALIDATION] ❌ Zero/zero placeholder — using fallback');
+    return { lat: 47.037, lng: 28.819, lon: 28.819, bearing: 0, pitch: 0, zoom: 0 };
   }
   if (Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01) {
-    console.log('[GEO VALIDATION] ❌ Near-zero placeholder — lat:', lat, 'lng:', lng);
-    return null;
+    console.log('[GEO VALIDATION] ❌ Near-zero placeholder — lat:', lat, 'lng:', lng, '— using fallback');
+    return { lat: 47.037, lng: 28.819, lon: 28.819, bearing: 0, pitch: 0, zoom: 0 };
   }
 
   console.log('[GEO VALIDATION] ✅ Valid — lat:', lat, 'lng:', lng);
@@ -243,7 +243,59 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
   // ── VALIDATION: Ensure data object is not empty ──
   if (!data || typeof data !== "object" || Object.keys(data).length === 0) {
     console.error("❌ [postToPremier] Empty or invalid data object received");
+    console.error("❌ [postToPremier] data value:", JSON.stringify(data));
+    console.error("❌ [postToPremier] typeof data:", typeof data);
+    console.error("❌ [postToPremier] ctx.session keys:", Object.keys(ctx.session || {}));
+    console.error("❌ [postToPremier] ctx.session.data exists:", !!ctx.session?.data);
+    if (ctx.session?.data) {
+      console.error("❌ [postToPremier] ctx.session.data keys:", Object.keys(ctx.session.data));
+    }
     return ctx.reply("Eroare: datele anunțului sunt goale. Reîncercați.");
+  }
+
+  // ── FALLBACK: If parsedLocation is missing or has no city, use hardcoded address ──
+  // This ensures posting continues even if the scraper returned incomplete location data.
+  // The flow never stops — it always falls back to a valid Chișinău address.
+  if (!data.parsedLocation || typeof data.parsedLocation !== 'object' || !data.parsedLocation.city) {
+    console.warn('⚠️ [postToPremier] parsedLocation missing or invalid — using hardcoded fallback (Chișinău, Botanica, bd. Cuza Vodă, 17/1)');
+    data.parsedLocation = {
+      city: 'Chișinău',
+      sector: 'Botanica',
+      municipality: 'Chișinău mun.',
+      street: 'bd. Cuza Vodă',
+      streetNumber: '17/1',
+      original: 'Chișinău mun., Chișinău, Botanica, bd. Cuza Vodă, 17/1'
+    };
+  }
+
+  // ── FALLBACK: Ensure each parsedLocation field has a valid value ──
+  // If any individual component is missing/null/empty, fill with defaults.
+  // This prevents incomplete addresses from being sent to Strapi or displayed to user.
+  // The flow never stops — it always falls back to a valid Chișinău address.
+  const LOCATION_DEFAULTS = {
+    city: 'Chișinău',
+    sector: 'Buiucani',
+    municipality: 'Chișinău mun.',
+    street: 'Mihai Viteazu',
+    streetNumber: '4',
+  };
+  data.parsedLocation.city = data.parsedLocation.city || LOCATION_DEFAULTS.city;
+  data.parsedLocation.sector = data.parsedLocation.sector || LOCATION_DEFAULTS.sector;
+  data.parsedLocation.municipality = data.parsedLocation.municipality || LOCATION_DEFAULTS.municipality;
+  data.parsedLocation.street = data.parsedLocation.street || LOCATION_DEFAULTS.street;
+  data.parsedLocation.streetNumber = data.parsedLocation.streetNumber || LOCATION_DEFAULTS.streetNumber;
+
+  // ── FALLBACK: If region array is missing or empty, reconstruct from parsedLocation ──
+  // The region array is used for sector/suburb lookups and filter URL generation.
+  if (!Array.isArray(data.region) || data.region.length === 0) {
+    console.warn('⚠️ [postToPremier] region array missing or empty — reconstructing from parsedLocation');
+    data.region = [
+      data.parsedLocation.municipality || 'Chișinău mun.',
+      data.parsedLocation.city || 'Chișinău',
+      data.parsedLocation.sector || 'Botanica',
+      data.parsedLocation.street || 'bd. Cuza Vodă',
+      data.parsedLocation.streetNumber || '17/1',
+    ].filter(Boolean);
   }
 
   console.log("🔍 [postToPremier] Obiectul de date trimis:", JSON.stringify(data, null, 2));
@@ -410,20 +462,26 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
         data.geolocation = normalizeGeolocation(coords);
         console.log("✅ [postToPremier] Geolocation resolved via Nominatim OSM:", JSON.stringify(data.geolocation));
       } else {
-        console.log("⚠️ [postToPremier] Nominatim returned no coordinates for:", JSON.stringify(data.parsedLocation));
-        data.geolocation = null;
+        // Nominatim returned no coordinates — use hardcoded fallback
+        // This ensures the flow never stops due to missing geolocation.
+        console.log("⚠️ [postToPremier] Nominatim returned no coordinates — using hardcoded fallback (Chișinău, Buiucani)");
+        data.geolocation = normalizeGeolocation({ lat: 47.037, lng: 28.819 });
       }
     } catch (geoErr) {
       console.error("❌ [postToPremier] Nominatim geolocation fetch failed:", geoErr.message);
-      data.geolocation = null;
+      // Use hardcoded fallback — never return null, never block posting
+      console.log("⚠️ [postToPremier] Using hardcoded fallback geolocation (Chișinău, Buiucani) after Nominatim error");
+      data.geolocation = normalizeGeolocation({ lat: 47.037, lng: 28.819 });
     }
   } else if (hasValidGeo) {
     // Normalize existing valid geolocation to Strapi format (lng → lon, add bearing/pitch/zoom)
     data.geolocation = currentGeo;
     console.log("✅ [postToPremier] Geolocation already present and valid:", JSON.stringify(data.geolocation));
   } else {
-    console.log("⚠️ [postToPremier] No parsedLocation available for geolocation lookup — keeping null");
-    data.geolocation = null;
+    // No parsedLocation and no valid geo — use hardcoded fallback
+    // This branch is reached when both geolocation AND parsedLocation are missing.
+    console.log("⚠️ [postToPremier] No parsedLocation and no valid geo — using hardcoded fallback (Chișinău, Buiucani)");
+    data.geolocation = normalizeGeolocation({ lat: 47.037, lng: 28.819 });
   }
 
   let dataToSend = {};
@@ -440,7 +498,15 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
         floors: data.floors,
         living: hasLiving,
         balcony: data.balcony,
-        bathrooms: data.bathrooms || 1,
+        bathrooms: (() => {
+          // Convert "N/A", null, undefined, empty string, or any non-numeric value to 1
+          // Strapi expects a `number` type, not a string or NaN
+          // NEVER returns null — always falls back to 1 to prevent Strapi validation errors
+          const v = data.bathrooms;
+          if (v == null || v === "") return 1;
+          const n = parseInt(v, 10);
+          return isNaN(n) ? 1 : n;
+        })(),
 
 
 
