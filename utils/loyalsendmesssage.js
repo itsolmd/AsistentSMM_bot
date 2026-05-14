@@ -45,7 +45,7 @@ function loyalSendMessage(data, ctx, userAdId) {
       `📐 *Suprafață:* ${data.suprafata || data.supraface || "—"} m²`,
       `🏢 *Etaj:* ${data.floor || "—"}/${data.floors || "—"}`,
       `🚽 *Băi:* ${data.baths || "—"}`,
-      `💰 *Preț11:* ${data.price ? data.price + " " + (data.currency || "€") : "—"}`,
+      `💰 *Preț:* ${data.price ? data.price + " " + (data.currency || "€") : "—"}`,
       
       
     ];

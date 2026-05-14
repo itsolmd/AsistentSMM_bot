@@ -1068,7 +1068,7 @@ const scrap_999 = async (ctx, url) => {
 🚽 Băi: ${extracted.bathrooms || 1}
 🏗️ Bloc: ${extracted.building}
 💰 Preț: ${extracted.price}
-📞• +${ctx.session.user.phoneNr} | ${ctx.session.user.name.split(" ")[0]}
+📞+${ctx.session.user.phoneNr}|${ctx.session.user.name.split(" ")[0]}
 🆔${formatId}`;
 
     // BUG #1 FIXED: clean escaped text
