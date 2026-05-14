@@ -1,0 +1,33 @@
+{
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "pm2-runtime start ecosystem.config.js",
+    "start:dev": "nodemon index.js",
+    "start:prod": "pm2 start ecosystem.config.js",
+    "start:pm2": "pm2 start ecosystem.config.js",
+    "stop": "pm2 stop asistent-smm-bot",
+    "restart": "pm2 restart asistent-smm-bot",
+    "logs": "pm2 logs asistent-smm-bot",
+    "monit": "pm2 monit",
+    "status": "pm2 status",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.10.0",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "hercai": "^12.4.0",
+    "mongodb": "^6.18.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "nodemon": "^3.1.9",
+    "pm2": "^5.4.3",
+    "punycode": "^2.3.1",
+    "puppeteer": "^24.2.1",
+    "sharp": "^0.33.5",
+    "telegraf": "^4.16.3",
+    "uuid": "^11.1.0"
+  }
+}
