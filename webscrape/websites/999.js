@@ -49,6 +49,13 @@ const scrap_999 = async (ctx, url) => {
     }
     const fixedUrl = urlParts.join("/");
 
+    console.log("");
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("🕷️  [SCRAP_999] ÎNCEPE EXTRAGERE DATE");
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("🔗 URL:", fixedUrl);
+    console.log("");
+
     // ── 2. Lansează browser ────────────────────────────────────
     const browser = await puppeteer.launch({
       headless: true,
@@ -56,6 +63,9 @@ const scrap_999 = async (ctx, url) => {
     });
     const page = await browser.newPage();
     await page.goto(fixedUrl, { waitUntil: 'networkidle2' });
+
+    console.log("✅ [SCRAP_999] Pagina încărcată cu succes");
+    console.log("");
 
     // ── 3. Extrage datele din pagină (fără CSS classes) ────────
     const extracted = await page.evaluate(() => {
@@ -103,10 +113,14 @@ const scrap_999 = async (ctx, url) => {
       };
 
       /* =========================================================
-         CÂMPURILE
+         CÂMPURILE — Extragere text cu logging organizat
          ========================================================= */
 
-      // ── ID anunț ─────────────────────────────────────────────
+      console.log("───────────────────────────────────────────────────────────");
+      console.log("📝 [SCRAP_999] EXTRAGERE TEXT");
+      console.log("───────────────────────────────────────────────────────────");
+
+      // ── 1. ID anunț ─────────────────────────────────────────────
       let advertId = null;
       if (advert?.id) {
         advertId = advert.id;
@@ -114,8 +128,9 @@ const scrap_999 = async (ctx, url) => {
         const idMatch = window.location.pathname.match(/\/(\d+)\/?$/);
         if (idMatch) advertId = idMatch[1];
       }
+      console.log(`  🆔 1) ID anunț: ${advertId}`);
 
-      // ── Tip proprietate ──────────────────────────────────────
+      // ── 2. Tip proprietate ──────────────────────────────────────
       let propertyType = 'N/A';
       if (advert?.categories?.subcategory?.title) {
         const sub = advert.categories.subcategory.title;
@@ -131,21 +146,20 @@ const scrap_999 = async (ctx, url) => {
         else if (/imobiliare comerciale|comercial/i.test(bodyText)) propertyType = 'Comercial';
         else if (/loturi de teren|teren/i.test(bodyText)) propertyType = 'Teren';
       }
+      console.log(`  🏠 2) Tip proprietate: ${propertyType}`);
 
-      // ── Locație completă ─────────────────────────────────────
+      // ── 3. Locație completă ─────────────────────────────────────
       // BUG FIX: Use .styles_map__title__UgISm as PRIMARY source for address
       // Supports Romanian, Russian, and mixed addresses
       let location = 'N/A';
       const mapTitleEl = document.querySelector('.styles_map__title__UgISm');
       if (mapTitleEl) {
         location = mapTitleEl.textContent.trim();
-        console.log('[ADDRESS] Raw from .styles_map__title__UgISm:', location);
       }
       if (location === 'N/A') {
         const regionMatch = bodyText.match(/Regiunea\s*[:]\s*(.+?)(?:\n|$)/i);
         if (regionMatch) {
           location = regionMatch[1].trim();
-          console.log('[ADDRESS] Raw from bodyText Regiunea:', location);
         }
       }
       if (location === 'N/A') {
@@ -155,12 +169,12 @@ const scrap_999 = async (ctx, url) => {
           const parts = h2Text.split(',').map(s => s.trim());
           if (parts.length >= 2) {
             location = parts.slice(1).join(', ').trim();
-            console.log('[ADDRESS] Raw from h2 fallback:', location);
           }
         }
       }
+      console.log(`  📍 3) Locație: ${location}`);
 
-      // ── Număr de camere (dormitoare) ─────────────────────────
+      // ── 4. Număr de camere (dormitoare) ─────────────────────────
       let rooms = 'N/A';
       const roomsRaw = extractByLabel('Număr de camere', bodyText);
       if (roomsRaw) {
@@ -170,16 +184,18 @@ const scrap_999 = async (ctx, url) => {
           if (n) rooms = n;
         }
       }
+      console.log(`  🛏️ 4) Camere: ${rooms}`);
 
-      // ── Suprafață ────────────────────────────────────────────
+      // ── 5. Suprafață ────────────────────────────────────────────
       let area = 'N/A';
       const areaRaw = extractByLabel('Suprafață totală', bodyText);
       if (areaRaw) {
         const n = extractNumber(areaRaw);
         if (n) area = n;
       }
+      console.log(`  📐 5) Suprafață: ${area} m²`);
 
-      // ── Etaj (BUG #6 FIXED: parse "6/12" correctly) ─────────
+      // ── 6. Etaj (BUG #6 FIXED: parse "6/12" correctly) ─────────
       let floor = 'N/A';
       let totalFloors = 'N/A';
       const floorRaw = extractByLabel('Etaj', bodyText);
@@ -202,8 +218,9 @@ const scrap_999 = async (ctx, url) => {
           if (n) totalFloors = n;
         }
       }
+      console.log(`  🏢 6) Etaj: ${floor}/${totalFloors}`);
 
-      // ── Băi (Grup sanitar) ──────────────────────────────────
+      // ── 7. Băi (Grup sanitar) ──────────────────────────────────
       // Fallback: if not found or invalid, default to 1
       // Never returns 'N/A' — always a valid number for Strapi
       let bathrooms = 1;
@@ -212,13 +229,15 @@ const scrap_999 = async (ctx, url) => {
         const n = extractNumber(bathRaw);
         if (n) bathrooms = n;
       }
+      console.log(`  🚽 7) Băi: ${bathrooms}`);
 
-      // ── Tip construcție (Fond locativ) ───────────────────────
+      // ── 8. Tip construcție (Fond locativ) ───────────────────────
       let building = 'N/A';
       const buildingRaw = extractByLabel('Fond locativ', bodyText);
       if (buildingRaw) {
         building = buildingRaw;
       }
+      console.log(`  🏗️ 8) Bloc: ${building}`);
 
       // ══════════════════════════════════════════════════════════
       // CARACTERISTICI APARTAMENT (BUG REPAIR)
@@ -417,7 +436,7 @@ const scrap_999 = async (ctx, url) => {
         features
       });
 
-      // ── Preț ─────────────────────────────────────────────────
+      // ── 9. Preț ─────────────────────────────────────────────────
       let price = 'N/A';
       if (advert?.price?.value && advert?.price?.unit) {
         const val = Number(advert.price.value);
@@ -431,9 +450,10 @@ const scrap_999 = async (ctx, url) => {
           price = `${Number(num).toLocaleString()} €`;
         }
       }
+      console.log(`  💰 9) Preț: ${price}`);
 
       // ══════════════════════════════════════════════════════════
-      // OFFER TYPE — Vând / Închiriez / Schimb
+      // 10. OFFER TYPE — Vând / Închiriez / Schimb
       // ══════════════════════════════════════════════════════════
       // OFFER_TYPE_MAP: maps UI labels to 999.md offer_type IDs
       // 776 = Vând (Sell), 777 = Cumpăr (Buy), 778 = Schimb (Exchange)
@@ -455,14 +475,12 @@ const scrap_999 = async (ctx, url) => {
       // Primary: __NEXT_DATA__ advert.offer_type
       if (advert?.offer_type?.value) {
         offerType = advert.offer_type.value;
-        console.log('[OFFER TYPE] From __NEXT_DATA__:', offerType);
       }
       // Secondary: .styles_filters__type__selector__title__NdcP_ selector
       if (offerType === 'N/A') {
         const filterTypeEl = document.querySelector('.styles_filters__type__selector__title__NdcP_');
         if (filterTypeEl) {
           offerType = filterTypeEl.textContent.trim();
-          console.log('[OFFER TYPE] From selector:', offerType);
         }
       }
       // Tertiary: extractByLabel('Tipul', bodyText)
@@ -470,7 +488,6 @@ const scrap_999 = async (ctx, url) => {
         const ot = extractByLabel('Tipul', bodyText);
         if (ot) {
           offerType = ot;
-          console.log('[OFFER TYPE] From bodyText:', offerType);
         }
       }
       // Map to numeric ID for filter URL
@@ -490,9 +507,9 @@ const scrap_999 = async (ctx, url) => {
           break;
         }
       }
-      console.log('[OFFER TYPE] Final text:', offerType, '→ ID:', offerTypeId);
+      console.log(`  🏷️ 10) Oferta: ${offerType} (ID: ${offerTypeId})`);
 
-      // ── Titlu ────────────────────────────────────────────────
+      // ── 11. Titlu ────────────────────────────────────────────────
       let title = 'N/A';
       if (advert?.title) {
         title = advert.title;
@@ -500,40 +517,212 @@ const scrap_999 = async (ctx, url) => {
         const h2 = document.querySelector('h2');
         if (h2) title = h2.textContent.trim();
       }
+      console.log(`  📌 11) Titlu: ${title}`);
 
-      // ── Descriere ────────────────────────────────────────────
+      // ── 12. Descriere ────────────────────────────────────────────
       let description = 'N/A';
       if (advert?.body) {
         description = advert.body;
       }
+      const descPreview = description !== 'N/A' ? description.substring(0, 80).replace(/\n/g, ' ') + '...' : 'N/A';
+      console.log(`  📄 12) Descriere: ${descPreview}`);
 
-      // ── Imagini (BUG #5 FIXED: deduplicate + normalize URLs) ─
-      // BUG v2.1 FIXED: __PROTO__ trick created https:/// (triple slash)
-      // Now using proper protocol-preserving path normalization
+      // ══════════════════════════════════════════════════════════════════
+      // IMAGINI — BUG FIX: Extrage DOAR imaginile reale ale anunțului
+      // ══════════════════════════════════════════════════════════════
+      // PROBLEMA (veche): Se extrăgeau imagini din TOATE <img>-urile paginii.
+      // 999.md injectează "recommended ads" și "similar listings" în DOM
+      // după galeria principală, iar acestea conțin imagini de pe același CDN
+      // (simpalsmedia.com/999.md/BoardImages). Filtrul extractImageUrl() NU
+      // poate distinge între imaginile reale și cele recomandate.
+      //
+      // SOLUȚIA:
+      //   1. Sursa PRIMARĂ: __NEXT_DATA__ → advert.photos / advert.images
+      //      (SSR autoritativ — conține DOAR imaginile reale ale anunțului)
+      //   2. Sursa SECUNDARĂ: Extragere DOAR din containerul galeriei
+      //      (găsit prin selectori structurali), NICIODATĂ din toată pagina
+      //   3. Containerul galeriei exclude automat recommended/similar ads
+      // ══════════════════════════════════════════════════════════════
+      const MAX_SCRAPER_IMAGES = 20;
       const images = [];
       const seenUrls = new Set();
+      let imgCounter = 0;
 
-      document.querySelectorAll('img[src]').forEach(img => {
-        const rawSrc = img.getAttribute('src') || '';
+      console.log("───────────────────────────────────────────────────────────");
+      console.log("📸 [SCRAP_999] EXTRAGERE IMAGINI");
+      console.log("───────────────────────────────────────────────────────────");
+
+      // ── Helper: normalizează URL imagine 999.md la full-size (900x900) ──
+      function extractImageUrl(rawSrc) {
+        if (!rawSrc) return null;
         const src = rawSrc.trim();
-        if (src.includes('simpalsmedia.com/999.md/BoardImages')) {
-          if (src.startsWith('http')) {
-            // Convertim la full-size (900x900)
-            let fullSize = src.replace(/\/\d+x\d+\//, '/900x900/').split('?')[0];
-            // Normalize: fix double slashes in PATH only, preserve protocol
-            const protoEnd = fullSize.indexOf('://') + 3;
-            const pathPart = fullSize.substring(protoEnd);
-            const cleanPath = pathPart.replace(/\/{2,}/g, '/');
-            fullSize = fullSize.substring(0, protoEnd) + cleanPath;
-            console.log('[RAW IMAGE EXTRACTED]', fullSize);
-            if (!seenUrls.has(fullSize)) {
-              seenUrls.add(fullSize);
-              images.push(fullSize);
+        if (!src.includes('simpalsmedia.com/999.md/BoardImages')) return null;
+        if (!src.startsWith('http')) return null;
+        // Convertim la full-size (900x900)
+        let fullSize = src.replace(/\/\d+x\d+\//, '/900x900/').split('?')[0];
+        // Normalize: fix double slashes in PATH only, preserve protocol
+        const protoEnd = fullSize.indexOf('://') + 3;
+        const pathPart = fullSize.substring(protoEnd);
+        const cleanPath = pathPart.replace(/\/{2,}/g, '/');
+        fullSize = fullSize.substring(0, protoEnd) + cleanPath;
+        return fullSize;
+      }
+
+      // ── Helper: extrage URL dintr-un element imagine (src sau data-src) ──
+      function getImgUrl(img) {
+        return img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy') || '';
+      }
+
+      // ── Helper: adaugă URL în lista de imagini (cu deduplicare + limită) ──
+      function addImage(url) {
+        if (!url) return;
+        if (images.length >= MAX_SCRAPER_IMAGES) return;
+        if (seenUrls.has(url)) return;
+        seenUrls.add(url);
+        images.push(url);
+        imgCounter++;
+        console.log(`  📷 Imagine ${imgCounter}: ${url}`);
+      }
+
+      // ── Helper: găsește containerul galeriei principale ─────────────────
+      function findGalleryContainer() {
+        // Strategie multi-selector pentru a găsi containerul oficial al galeriei
+        const selectors = [
+          // CSS module: orice clasă care conține "gallery" (ex: styles_gallery__abc123)
+          '[class*="gallery"]',
+          // Swiper carousel (999.md folosește Swiper în galerie)
+          '.swiper',
+          // Orice container cu "slider" în clasă
+          '[class*="slider"]',
+          // Orice container cu "carousel" în clasă (ortografie alternativă)
+          '[class*="carousel"]',
+          // Container cu "photos" în clasă
+          '[class*="photos"]',
+        ];
+        for (const selector of selectors) {
+          const el = document.querySelector(selector);
+          if (el) {
+            console.log(`  🔍 [GALERIE] Container găsit cu selectorul: "${selector}"`);
+            return el;
+          }
+        }
+        // Dacă niciun selector nu a găsit containerul, caută primul element
+        // care conține 2+ imagini BoardImages — probabil galeria principală
+        console.log('  🔍 [GALERIE] Căutare container fallback — primul element cu multiple BoardImages...');
+        const allCandidates = document.querySelectorAll('div, section, main, article');
+        for (const candidate of allCandidates) {
+          const imgs = candidate.querySelectorAll('img');
+          let boardCount = 0;
+          for (const img of imgs) {
+            const url = getImgUrl(img);
+            if (url && url.includes('simpalsmedia.com/999.md/BoardImages')) boardCount++;
+            if (boardCount >= 2) {
+              console.log(`  🔍 [GALERIE] Container fallback găsit: <${candidate.tagName.toLowerCase()} class="${(candidate.className || '').slice(0, 60)}">`);
+              return candidate;
             }
           }
         }
-      });
-      console.log('[RAW IMAGES extracted from page]', images.length, 'images');
+        console.log('  ⚠️ [GALERIE] Niciun container de galerie găsit — fallback la document.body');
+        return document.body;
+      }
+
+      // ── DEBUG: Numără imagini BoardImages în toată pagina (pentru comparație) ──
+      const allPageImages = Array.from(document.querySelectorAll('img[src], img[data-src], img[data-lazy]'))
+        .filter(img => {
+          const url = getImgUrl(img);
+          return url && url.includes('simpalsmedia.com/999.md/BoardImages');
+        });
+      console.log(`  🔢 [DEBUG] Total imagini BoardImages pe PAGINA ÎNTREAGĂ: ${allPageImages.length}`);
+
+      // ══════════════════════════════════════════════════════════════
+      // SURSA 1 (PRIMARĂ): __NEXT_DATA__ → advert.photos / advert.images
+      // ══════════════════════════════════════════════════════════════
+      // SSR data conține DOAR imaginile reale ale anunțului (0% risc de
+      // contaminare cu recommended/similar ads).
+      // ══════════════════════════════════════════════════════════════
+      let ssrImageUrls = [];
+      if (advert) {
+        // Verifică mai multe nume de proprietăți posibile
+        const photoCandidates = [
+          advert.photos,
+          advert.images,
+          advert.pictures,
+        ];
+        for (const photos of photoCandidates) {
+          if (Array.isArray(photos) && photos.length > 0) {
+            ssrImageUrls = photos
+              .map(p => {
+                // Poate fi obiect { url: "..." } sau direct string
+                const rawUrl = typeof p === 'string' ? p : (p?.url || p?.src || p?.full_url || p?.path || p?.link);
+                return extractImageUrl(rawUrl);
+              })
+              .filter(Boolean);
+            if (ssrImageUrls.length > 0) {
+              console.log(`  📦 [SSR] imagini din __NEXT_DATA__.${photoCandidates.indexOf(photos) === 0 ? 'photos' : photoCandidates.indexOf(photos) === 1 ? 'images' : 'pictures'}: ${ssrImageUrls.length}`);
+              break;
+            }
+          }
+        }
+      }
+
+      if (ssrImageUrls.length > 0) {
+        // Folosește imaginile din SSR — sunt autoritative și nu conțin recomandări
+        console.log(`  ✅ [SURSĂ] Folosesc ${ssrImageUrls.length} imagini din __NEXT_DATA__ SSR (autoritative, 0% recomandări)`);
+        ssrImageUrls.forEach(url => addImage(url));
+        console.log(`  🎯 [GALERIE] Număr REAL în galerie (SSR): ${ssrImageUrls.length}`);
+      } else {
+        // ══════════════════════════════════════════════════════════
+        // SURSA 2 (SECUNDARĂ): Containerul galeriei principale
+        // ══════════════════════════════════════════════════════════
+        // Când SSR nu are imagini (999.md App Router → uneori __NEXT_DATA__
+        // lipsește sau nu conține photos), extragem DOAR din containerul
+        // galeriei — NICIODATĂ din toată pagina.
+        // ══════════════════════════════════════════════════════════
+        console.log('  ℹ️ [SURSĂ] __NEXT_DATA__ nu conține imagini — caut container galerie în DOM');
+        const galleryContainer = findGalleryContainer();
+
+        // Debug: câte imagini BoardImages sunt în containerul galeriei
+        const galleryImgs = galleryContainer.querySelectorAll('img');
+        let galleryBoardCount = 0;
+        galleryImgs.forEach(img => {
+          const url = getImgUrl(img);
+          if (url && url.includes('simpalsmedia.com/999.md/BoardImages')) galleryBoardCount++;
+        });
+        console.log(`  🎯 [GALERIE] Număr REAL detectat în containerul galeriei: ${galleryBoardCount} imagini BoardImages`);
+        console.log(`  🎯 [GALERIE] Diferență față de totalul paginii: ${allPageImages.length - galleryBoardCount} imagini în afara galeriei (recommended/similar/thumbnails)`);
+
+        // Extrage imagini DOAR din containerul galeriei
+        galleryImgs.forEach(img => {
+          const url = extractImageUrl(getImgUrl(img));
+          addImage(url);
+        });
+
+        console.log(`  ✅ [SURSĂ] Folosesc ${images.length} imagini din containerul galeriei (excluse ${allPageImages.length - images.length} imagini din recommended/similar ads)`);
+      }
+
+      // ══════════════════════════════════════════════════════════════
+      // FALLBACK: og:image — doar dacă nu s-a găsit NICI o imagine
+      // ══════════════════════════════════════════════════════════════
+      if (images.length === 0) {
+        console.log('  ⚠️ [FALLBACK] Nicio imagine găsită în SSR sau galerie — încerc og:image');
+        const ogImage = document.querySelector('meta[property="og:image"]');
+        if (ogImage) {
+          const url = extractImageUrl(ogImage.getAttribute('content'));
+          addImage(url);
+        }
+      }
+
+      // ── DEBUG FINAL: TOATE URL-urile imaginilor ────────────────
+      console.log(`───────────────────────────────────────────────────────────`);
+      console.log(`📊 [DEBUG] RAPORT IMAGINI`);
+      console.log(`───────────────────────────────────────────────────────────`);
+      console.log(`  🔢 Total imagini pe PAGINA ÎNTREAGĂ: ${allPageImages.length}`);
+      console.log(`  🎯 Număr REAL în galeria anunțului: ${images.length}`);
+      console.log(`  📊 Selector folosit: ${ssrImageUrls.length > 0 ? '__NEXT_DATA__ SSR' : 'findGalleryContainer()'}`);
+      console.log(`✅ [SCRAP_999] Total imagini extrase: ${images.length}`);
+      console.log(`📸 TOATE imaginile:`);
+      images.forEach((url, i) => console.log(`  ${i + 1}. ${url}`));
+      console.log("");
 
       // ══════════════════════════════════════════════════════════════
       // GEOLOCATION — Multiple source extraction
@@ -749,7 +938,6 @@ const scrap_999 = async (ctx, url) => {
           // Skip known non-owner numbers (support/developer)
           if (phone === '37322888002') continue;
           phoneNr = phone;
-          console.log('[PHONE] From RSC flight data:', phoneNr);
           break;
         }
         if (phoneNr) break;
@@ -766,7 +954,6 @@ const scrap_999 = async (ctx, url) => {
               ?.replace('tel:', '')
               ?.replace(/\s+/g, '')
               ?.trim();
-            console.log('[PHONE] From DOM phone__link:', phoneNr);
           }
         }
       }
@@ -779,10 +966,17 @@ const scrap_999 = async (ctx, url) => {
             ?.replace('tel:', '')
             ?.replace(/\s+/g, '')
             ?.trim();
-          console.log('[PHONE] Fallback href:', fallbackHref);
-          console.log('[PHONE] Fallback normalized:', phoneNr);
         }
       }
+      console.log(`  📞 13) Telefon: ${phoneNr || 'N/A'}`);
+
+      // ── 14. Geolocare ───────────────────────────────────────────
+      const geoStr = geolocation ? `${geolocation.lat}, ${geolocation.lng}` : 'N/A';
+      console.log(`  🌍 14) Geolocare: ${geoStr}`);
+
+      console.log("───────────────────────────────────────────────────────────");
+      console.log("✅ [SCRAP_999] EXTRAGERE TEXT COMPLETĂ");
+      console.log("───────────────────────────────────────────────────────────");
 
       // ── Return ───────────────────────────────────────────────
       return {
@@ -1180,43 +1374,39 @@ const scrap_999 = async (ctx, url) => {
     };
 
     // ══════════════════════════════════════════════════════════════
-    // DETAILED DEBUG LOGS (BUG FIX v3.0)
+    // REZUMAT FINAL ORGANIZAT
     // ══════════════════════════════════════════════════════════════
-    console.log('[DEBUG v3.0] === SCRAPER RESULT DEBUG ===');
-    console.log('[DEBUG v3.0] Extracted owner phone:', phoneNr || 'NONE');
-    console.log('[DEBUG v3.0] Final geolocation:', JSON.stringify(geolocation));
-    console.log('[DEBUG v3.0] Final heating ID:', normalizedHeating);
-    console.log('[DEBUG v3.0] Final offer type:', extracted.offerType, '(ID:', extracted.offerTypeId + ')');
-    console.log('[DEBUG v3.0] Final building:', extracted.building);
-    console.log('[DEBUG v3.0] Final balcony ID:', normalizedBalcony);
-    console.log('[DEBUG v3.0] Final condition:', normalizedCondition);
-    console.log('[DEBUG v3.0] Final rooms:', extracted.rooms);
-    console.log('[DEBUG v3.0] Final area:', extracted.area);
-    console.log('[DEBUG v3.0] Final floor:', floorParsed.floor, '/', floorParsed.totalFloors);
-    console.log('[DEBUG v3.0] ============================');
-
-    console.log('[HEATING FINAL]', result.heating);
-
-    console.log('✅ [scrap_999] Date extrase cu succes');
-    console.log('📝 Output formatat:\n', formattedText);
-    console.log('🔍 [scrap_999] Region array:', result.region);
-    console.log('🔍 [scrap_999] Parsed location:', JSON.stringify(parsedLocation));
-    console.log('🔍 [scrap_999] Price numeric:', priceNumeric);
-    console.log('🔍 [scrap_999] Floor parsed:', JSON.stringify(floorParsed));
-    console.log('🔍 [scrap_999] RAW images from page:', extracted.images.length);
-    console.log('🔍 [scrap_999] RAW image URLs:', JSON.stringify(extracted.images.slice(0, 3)) + (extracted.images.length > 3 ? `... (+${extracted.images.length - 3} more)` : ''));
-    console.log('🔍 [scrap_999] NORMALIZED unique images:', uniqueImages.length);
-    console.log('🔍 [scrap_999] NORMALIZED image URLs:', JSON.stringify(uniqueImages.slice(0, 3)) + (uniqueImages.length > 3 ? `... (+${uniqueImages.length - 3} more)` : ''));
-    console.log('🔍 [scrap_999] Phone:', phoneNr);
-    console.log('🔍 [scrap_999] Geolocation:', JSON.stringify(geolocation));
-    // BUG REPAIR: Debug logs for characteristics
-    console.log('🔍 [scrap_999] Heating (normalized):', result.heating);
-    console.log('🔍 [scrap_999] Condition (normalized):', result.condition);
-    console.log('🔍 [scrap_999] Serie (normalized):', result.serie);
-    console.log('🔍 [scrap_999] Features (normalized):', result.features);
-    console.log('🔍 [scrap_999] Balcony (normalized):', result.balcony);
-    console.log('🔍 [scrap_999] Living (normalized):', result.living);
-    console.log('🔍 [scrap_999] Developer (normalized):', result.developer);
+    console.log("");
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("📊 [SCRAP_999] REZUMAT FINAL EXTRAGERE");
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log(`  🏠 Tip:        ${extracted.propertyType}`);
+    console.log(`  📍 Locație:    ${extracted.location}`);
+    console.log(`  🛏️  Camere:     ${extracted.rooms}`);
+    console.log(`  📐 Suprafață:  ${extracted.area} m²`);
+    console.log(`  🏢 Etaj:       ${floorParsed.floor}/${floorParsed.totalFloors}`);
+    console.log(`  🚽 Băi:        ${extracted.bathrooms}`);
+    console.log(`  🏗️  Bloc:       ${extracted.building}`);
+    console.log(`  💰 Preț:       ${extracted.price}`);
+    console.log(`  🏷️  Oferta:     ${extracted.offerType} (ID: ${extracted.offerTypeId})`);
+    console.log(`  📌 Titlu:      ${extracted.title}`);
+    console.log(`  📞 Telefon:    ${phoneNr || 'N/A'}`);
+    console.log(`  🌍 Geo:        ${geolocation ? `${geolocation.lat}, ${geolocation.lng}` : 'N/A'}`);
+    console.log(`  🆔 ID:         ${formatId}`);
+    console.log("");
+    console.log(`  📸 Imagini RAW:     ${extracted.images.length}`);
+    console.log(`  📸 Imagini unice:   ${uniqueImages.length}`);
+    console.log(`  🔥 Încălzire:       ${result.heating}`);
+    console.log(`  🛠️  Stare:           ${result.condition}`);
+    console.log(`  📋 Serie:           ${result.serie}`);
+    console.log(`  ✅ Caracteristici:  ${result.features.length} items`);
+    console.log(`  🏠 Balcon:          ${result.balcony}`);
+    console.log(`  🛋️  Living:           ${result.living}`);
+    console.log(`  🏗️  Dezvoltator:     ${result.developer}`);
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("✅ [SCRAP_999] EXTRAGERE COMPLETĂ");
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("");
 
     return result;
   } catch (err) {

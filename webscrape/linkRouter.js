@@ -1,7 +1,10 @@
 // webscrape/linkRouter.js
 const { Markup } = require("telegraf");
+const fs = require("fs");
+const https = require("https");
+const http = require("http");
 
-const { sendMessage }            = require("../utils/message_main");
+const { sendMessage, buildCaptionText } = require("../utils/message_main");
 const { sendFilter }             = require("../utils/messasge_filter");
 const { loyalSendMessage }       = require("../utils/loyalsendmesssage");
 const { sanitizeAdData }         = require("../utils/telegramSafeText");
@@ -14,10 +17,158 @@ const { parseLoyal }             = require("./websites/loyal");
 const axios                      = require("axios");
 const { sendMessageFromPremier } = require("../utils/message_main_premier");
 
+// Watermark removal service
+const { processListingImages }   = require("../WaterMark-services/watermark");
+
 /*───────────────────────────────────────────────────────────*/
 /* Helpers                                                   */
 /*───────────────────────────────────────────────────────────*/
 
+/**
+ * splitIntoBatches(array, batchSize)
+ * Splits an array into chunks of `batchSize`.
+ * Used to send Telegram media groups in batches of 10.
+ */
+function splitIntoBatches(array, batchSize = 10) {
+  const batches = [];
+  for (let i = 0; i < array.length; i += batchSize) {
+    batches.push(array.slice(i, i + batchSize));
+  }
+  return batches;
+}
+
+/**
+ * validateImageUrlReachable(url, timeoutMs)
+ * -----------------------------------------
+ * Performs a HEAD request to check if an image URL is reachable.
+ * Used to filter out broken/dead images BEFORE sending to Telegram.
+ *
+ * @param  {string}  url       - Image URL to validate
+ * @param  {number}  timeoutMs - Timeout in ms (default: 5000)
+ * @return {Promise<boolean>}  - true if URL responds with 2xx/3xx
+ */
+function validateImageUrlReachable(url, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    try {
+      const client = url.startsWith("https") ? https : http;
+      const req = client.request(url, { method: "HEAD", timeout: timeoutMs }, (res) => {
+        resolve(res.statusCode >= 200 && res.statusCode < 400);
+      });
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => { req.destroy(); resolve(false); });
+      req.end();
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * filterReachableImages(images, concurrency)
+ * -------------------------------------------
+ * Validates an array of image URLs concurrently and returns only
+ * the ones that are reachable (HTTP 2xx/3xx). Used to pre-filter
+ * dead links before sending to Telegram media groups.
+ *
+ * @param  {string[]} images     - Array of image URLs
+ * @param  {number}   concurrency - Max concurrent HEAD requests (default: 5)
+ * @return {Promise<string[]>}    - Array of reachable image URLs
+ */
+async function filterReachableImages(images, concurrency = 5) {
+  if (!Array.isArray(images) || images.length === 0) return [];
+
+  const results = [];
+  const queue = [...images];
+
+  async function worker() {
+    while (queue.length > 0) {
+      const url = queue.shift();
+      const reachable = await validateImageUrlReachable(url);
+      results.push({ url, reachable });
+      if (!reachable) {
+        console.warn(`  🔍 [URL CHECK] ⛔ Dead image filtered: ${url}`);
+      }
+    }
+  }
+
+  const workers = Array(Math.min(concurrency, images.length)).fill().map(() => worker());
+  await Promise.all(workers);
+
+  const valid = results.filter(r => r.reachable).map(r => r.url);
+  const removed = results.length - valid.length;
+  if (removed > 0) {
+    console.warn(`  🔍 [URL CHECK] Eliminate ${removed}/${results.length} imagini moarte/inaccesibile`);
+  }
+  return valid;
+}
+
+/**
+ * sendMediaGroupWithFallback(ctx, mediaGroup, captionText, batchIndex, totalBatches)
+ *
+ * Attempts to send a media group. If it fails, logs the error and falls back
+ * to sending images ONE BY ONE so that valid images are preserved and only
+ * the problematic ones are skipped.
+ *
+ * @param {Object} ctx          - Telegraf context
+ * @param {Array}  mediaGroup   - Array of media objects for sendMediaGroup
+ * @param {string} captionText  - Caption text for the last image
+ * @param {number} batchIndex   - Current batch index (0-based)
+ * @param {number} totalBatches - Total number of batches
+ * @returns {Promise<boolean>}  - true if at least one image was sent
+ */
+async function sendMediaGroupWithFallback(ctx, mediaGroup, captionText, batchIndex, totalBatches) {
+  try {
+    // Attempt full media group send
+    await ctx.replyWithMediaGroup(mediaGroup);
+    return true;
+  } catch (err) {
+    console.warn(`  ⚠️ Batch ${batchIndex + 1}/${totalBatches} media group error: ${err.message}`);
+    console.warn(`  ⚠️ Falling back to per-image sending for batch ${batchIndex + 1}...`);
+
+    // Fallback: send each image individually, attaching caption only on the LAST
+    // successfully sent image of the LAST batch.
+    let lastSuccessIndex = -1;
+    const results = [];
+
+    for (let i = 0; i < mediaGroup.length; i++) {
+      const item = mediaGroup[i];
+      try {
+        // Only send caption on the very last image of the entire set.
+        // For per-image fallback, we don't know yet if this is the last
+        // successful one, so we send without caption first, then edit later.
+        await ctx.replyWithPhoto(item.media, { caption: undefined });
+        results.push({ index: i, success: true });
+        lastSuccessIndex = i;
+      } catch (imgErr) {
+        console.warn(`  ⚠️ Image ${i + 1} in batch ${batchIndex + 1} FAILED: ${imgErr.message} — skipping`);
+        results.push({ index: i, success: false, error: imgErr.message });
+      }
+    }
+
+    // Send caption as a separate text message for the last batch
+    if (captionText && batchIndex === totalBatches - 1 && lastSuccessIndex >= 0) {
+      try {
+        await ctx.reply(captionText, { parse_mode: "Markdown" });
+      } catch (captionErr) {
+        console.warn(`  ⚠️ Caption fallback error: ${captionErr.message} — sending without parse_mode`);
+        try {
+          await ctx.reply(captionText);
+        } catch (finalErr) {
+          console.error(`  ❌ Caption completely failed: ${finalErr.message}`);
+        }
+      }
+    }
+
+    const sentCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+    if (sentCount > 0) {
+      console.log(`  ✅ Batch ${batchIndex + 1} fallback: ${sentCount} sent, ${failedCount} failed`);
+      return true;
+    }
+    console.error(`  ❌ Batch ${batchIndex + 1} fallback: ALL ${failedCount} images failed`);
+    return false;
+  }
+}
 /**
  * persistSessionDataToMongo(ctx, db)
  *
@@ -69,7 +220,20 @@ const returnPremierOptions = async (ctx, db) => {
     // ── PERSIST to MongoDB for resilience across callback queries ──
     await persistSessionDataToMongo(ctx, db);
 
-    await ctx.replyWithMediaGroup(sendMessageFromPremier(ctx));
+    const { thumbnails, captionText } = sendMessageFromPremier(ctx);
+    const premierBatches = splitIntoBatches(thumbnails, 10);
+    for (let batchIndex = 0; batchIndex < premierBatches.length; batchIndex++) {
+      const batch = premierBatches[batchIndex];
+      const isLastBatch = batchIndex === premierBatches.length - 1;
+      const mediaGroup = batch.map((thumbnail, index) => ({
+        type: thumbnail.type,
+        media: thumbnail.media,
+        ...(isLastBatch && index === batch.length - 1
+          ? { caption: captionText, parse_mode: 'Markdown' }
+          : {}),
+      }));
+      await ctx.replyWithMediaGroup(mediaGroup);
+    }
     await ctx.reply(
       "Ce doriți să faceți?",
       Markup.inlineKeyboard([
@@ -85,13 +249,22 @@ const returnPremierOptions = async (ctx, db) => {
 const returnInfoInChat = async (adData, ctx, userAdId, db) => {
   if (!adData) return ctx.reply("Nu am putut extrage datele.");
 
+  console.log("");
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("📨 [LINK ROADER] PRELUCRARE ANUNȚ");
+  console.log("═══════════════════════════════════════════════════════════");
+
   /*─── DEBUG: Log raw images before any sanitization ────────────*/
-  console.log('[linkRouter] RAW images count:', adData.images?.length || 0);
+  const rawImgCount = adData.images?.length || 0;
+  console.log(`  📸 Imagini brute: ${rawImgCount}`);
   if (adData.images && adData.images.length > 0) {
-    console.log('[linkRouter] First 3 raw image URLs:', JSON.stringify(adData.images.slice(0, 3)));
+    adData.images.forEach((img, i) => {
+      console.log(`     ${i + 1}. ${img}`);
+    });
   }
 
   /*─── SAFETY: sanitize all text fields before sending to Telegram ───*/
+  console.log("  🔧 Sanitizare câmpuri text...");
   adData = sanitizeAdData(adData);
 
   /*─── SAFETY: sanitize ALL image URLs before mediaGroup ───────────
@@ -100,13 +273,73 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
       - Disallowed character in URL host
     sanitizeImages() removes ALL dangerous URLs automatically.
     ──────────────────────────────────────────────────────────────*/
+  console.log("  🔧 Sanitizare URL-uri imagini...");
   adData.images = sanitizeImages(adData.images);
+  console.log(`  📸 Imagini după sanitizare: ${adData.images.length}`);
+
+  /*─── WATERMARK REMOVAL ─────────────────────────────────────────
+    If WATERMARK_ENABLE=true (default), automatically process all
+    listing images through the PrecisionCounter API to remove visible
+    watermarks/logos BEFORE sending to Telegram.
+
+    Pipeline:
+      1. Download each image URL to a temp file
+      2. Call PrecisionCounter API (with retry + fallback)
+      3. Save cleaned image locally
+      4. Replace URLs with Telegraf-compatible InputFile references
+
+    Graceful degradation:
+      - If the API fails, the original image URL is kept
+      - If the service is disabled, original URLs are used
+      - Never blocks or crashes the bot
+    ──────────────────────────────────────────────────────────────*/
+  let wmImageInputs = null; // Array of Telegraf InputFile objects or URLs
+
+  if (
+    process.env.WATERMARK_ENABLE !== "false" &&
+    Array.isArray(adData.images) &&
+    adData.images.length > 0
+  ) {
+    try {
+      console.log("  💧 [WATERMARK] Pornire pipeline eliminare watermark...");
+      const pipelineResult = await processListingImages(adData.images, {
+        concurrency: 3,
+      });
+
+      const hasCleaned = pipelineResult.cleanedImages.some(
+        (r) => r.success && !r.fallbackUsed
+      );
+
+      if (hasCleaned) {
+        wmImageInputs = pipelineResult.cleanedImages.map((result) => {
+          if (result.success && result.cleanedPath && !result.fallbackUsed) {
+            // Telegraf accepts { source: ReadStream } for local files
+            return { source: fs.createReadStream(result.cleanedPath) };
+          }
+          // Fallback: keep original URL
+          return result.originalUrl;
+        });
+
+        const cleanedCount = wmImageInputs.filter(
+          (i) => typeof i === "object"
+        ).length;
+        console.log(`  💧 [WATERMARK] ${cleanedCount}/${wmImageInputs.length} imagini curățate`);
+      } else {
+        console.log("  💧 [WATERMARK] Nicio imagine curățată — se folosesc originalele");
+      }
+    } catch (wmErr) {
+      // NEVER crash the bot — log and continue with original images
+      console.error("  💧 [WATERMARK] Eroare pipeline:", wmErr.message);
+    }
+  }
 
   // ── DEEP CLONE: Store a copy of the data in session to prevent any
   //    cross-context mutation issues between text handler and callback
   //    query contexts. The Telegraf session middleware may persist the
   //    object reference, and any subsequent modifications to `adData`
   //    (e.g., in media group fallback) could corrupt the session copy.
+  //    NOTE: session always stores original URLs, NOT InputFile objects,
+  //    so platform posting (Meta/999/Premier) always gets valid URLs.
   ctx.session.data = JSON.parse(JSON.stringify(adData));
   console.log('[linkRouter] session.data stored — keys:', Object.keys(ctx.session.data).join(', '));
 
@@ -130,26 +363,94 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
     return; // ⛔ Exit early — no mediaGroup to send
   }
 
-  /*─── 1. Trimitem galeria ───*/
-  try {
-    if (adData.link.includes("loyal.md")) {
-      await ctx.replyWithMediaGroup(loyalSendMessage(adData, ctx, userAdId));
-    } else {
-      await ctx.replyWithMediaGroup(sendMessage(adData, ctx, userAdId));
+  /*─── 1. Trimitem galeria — in loturi de câte 10 imagini ───
+    REGULA CORECTĂ:
+    1. Construim textul caption O SINGURĂ DATĂ
+    2. Împărțim imaginile în batch-uri de max 10
+    3. Pentru fiecare batch, construim mediaGroup MANUAL
+    4. Caption doar pe ultima imagine a ULTIMULUI batch
+    5. Batch-urile anterioare NU au caption
+    ──────────────────────────────────────────────────────────────*/
+  const telegramImages = wmImageInputs || adData.images;
+
+  console.log("───────────────────────────────────────────────────────────");
+  console.log("📤 [LINK ROADER] TRIMITERE MESAJE TELEGRAM");
+  console.log("───────────────────────────────────────────────────────────");
+
+  // Build caption text once (shared across all batches)
+  const captionText = adData.link.includes("loyal.md")
+    ? null // loyal.md builds its own caption inside loyalSendMessage
+    : buildCaptionText(adData, ctx, userAdId);
+
+  /*─── PRE-VALIDATION: Filter out unreachable images BEFORE sending ───
+    Runs concurrent HEAD requests (5 at a time) to verify each image URL
+    is reachable. Removes dead/broken images that would cause the entire
+    mediaGroup to fail. The timeout is short (5s) so it won't block long.
+
+    NOTE: watermark-cleaned images (InputFile objects) skip URL validation,
+    while unprepared URLs go through the HEAD check.
+    ──────────────────────────────────────────────────────────────────*/
+  let imagesForSending = telegramImages;
+  if (!wmImageInputs) {
+    // Only pre-validate if we're sending raw URLs (not watermark-cleaned InputFiles)
+    const preValidated = await filterReachableImages(telegramImages, 5);
+    const removedCount = telegramImages.length - preValidated.length;
+    if (removedCount > 0) {
+      console.warn(`  🔍 Eliminate ${removedCount} imagini irecuperabile (URL mort) înainte de trimitere`);
     }
-  } catch {
-    // Fallback: try with only the first image
-    adData.images = [adData.images[0]];
-    try {
+    imagesForSending = preValidated;
+  }
+
+  // If all images are dead, send text fallback
+  if (imagesForSending.length === 0) {
+    console.warn('  ⚠️ Toate imaginile sunt inaccesibile — trimitere text fallback');
+    const fallbackText = `📄 *Anunț (fără imagini)*\n\n${captionText || adData.description || "Descriere indisponibilă"}\n\n🔗 ${adData.link || "N/A"}`;
+    await ctx.reply(fallbackText, { disable_web_page_preview: true, parse_mode: "Markdown" });
+  } else {
+    // Split images into batches FIRST (max 10 per batch for Telegram)
+    const imageBatches = splitIntoBatches(imagesForSending, 10);
+    console.log(`  📤 Trimitere ${imageBatches.length} media group(s) pentru ${imagesForSending.length} imagini...`);
+
+    let anyBatchFailed = false;
+
+    for (let batchIndex = 0; batchIndex < imageBatches.length; batchIndex++) {
+      const batch = imageBatches[batchIndex];
+      const isLastBatch = batchIndex === imageBatches.length - 1;
+
+      let mediaGroup;
+
       if (adData.link.includes("loyal.md")) {
-        await ctx.replyWithMediaGroup(loyalSendMessage(adData, ctx, userAdId));
+        // loyal.md builds its own media group per batch
+        mediaGroup = loyalSendMessage(adData, ctx, userAdId, batch);
       } else {
-        await ctx.replyWithMediaGroup(sendMessage(adData, ctx, userAdId));
+        // Build media group manually for this batch
+        // Caption ONLY on last image of LAST batch
+        mediaGroup = batch.map((img, index) => ({
+          type: "photo",
+          media: img,
+          ...(isLastBatch && index === batch.length - 1
+            ? { caption: captionText, parse_mode: "Markdown" }
+            : {}),
+        }));
       }
-    } catch (secondErr) {
-      // Last resort: send text-only to keep bot alive
-      const fallbackText = `📄 *Anunț (fallback text)*\n\n${adData.description || "Descriere indisponibilă"}\n\n🔗 ${adData.link || "N/A"}`;
-      await ctx.reply(fallbackText, { disable_web_page_preview: true, parse_mode: "Markdown" });
+
+      console.log(`     📤 Batch ${batchIndex + 1}/${imageBatches.length} (${batch.length} imagini)${isLastBatch ? ' + caption' : ''}`);
+
+      const batchSuccess = await sendMediaGroupWithFallback(
+        ctx, mediaGroup,
+        isLastBatch ? captionText : null,
+        batchIndex, imageBatches.length
+      );
+
+      if (!batchSuccess) {
+        anyBatchFailed = true;
+      }
+    }
+
+    if (!anyBatchFailed) {
+      console.log(`  ✅ ${imageBatches.length} media group(s) trimise cu succes`);
+    } else {
+      console.warn(`  ⚠️ Unele batch-uri au avut erori, dar imaginile valabile au fost trimise individual`);
     }
   }
 
@@ -174,11 +475,13 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
   /*─── 3. Butoane de acțiune ───*/
   const keyboard = ctx.session.user.type === "admin"
     ? Markup.inlineKeyboard([
+        Markup.button.callback("Postează",    "post_platforms"),
         Markup.button.callback("Post Premier", "post_premier"),
-        Markup.button.callback("Nu posta",      "post_no"),
-        Markup.button.callback("Edit",          "edit"),
+        Markup.button.callback("Nu posta",     "post_no"),
+        Markup.button.callback("Edit",         "edit"),
       ])
     : Markup.inlineKeyboard([
+        Markup.button.callback("Postează", "post_platforms"),
         Markup.button.callback("Nu posta", "post_no"),
         Markup.button.callback("Edit",     "edit"),
       ]);

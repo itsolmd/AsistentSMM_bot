@@ -30,7 +30,7 @@ function buildTelegramLocation(parsedLocation) {
   return formatted || null;
 }
 
-function loyalSendMessage(data, ctx, userAdId) {
+function loyalSendMessage(data, ctx, userAdId, images = null) {
     // Build clean Telegram location from parsedLocation if available
     const telegramLocation = data.parsedLocation
       ? buildTelegramLocation(data.parsedLocation)
@@ -60,15 +60,16 @@ function loyalSendMessage(data, ctx, userAdId) {
     }
   
     const caption = captionLines.join("\n");
+    const imageList = images || data.images || [];
   
-    // Pregătim media group cu imagini (maxim 10)
-    const mediaGroup = (data.images || []).slice(0, 10).map((url, idx) => ({
+    // Generează mediaGroup DOAR pentru imaginile din acest batch.
+    // Caption pe ultima imagine a batch-ului curent.
+    // Caller-ul trebuie să împartă imaginile în batch-uri de max 10 ÎNAINTE de a apela această funcție.
+    return imageList.map((url, idx) => ({
       type: "photo",
       media: url,
-      caption: idx === 0 ? caption : "",  // caption doar la prima imagine
+      caption: idx === imageList.length - 1 ? caption : "",
     }));
-  
-    return mediaGroup;
   }
   
   module.exports = { loyalSendMessage };
@@ -102,7 +103,7 @@ function loyalSendMessage(data, ctx, userAdId) {
 //     `.trim();
   
 //     // ------- grup media -------
-//     return (data.images || []).slice(0, 10).map((url, idx) => ({
+//     return (data.images || []).slice(0, 20).map((url, idx) => ({
 //       type      : "photo",
 //       media     : url,
 //       caption   : idx === 0 ? caption : "",

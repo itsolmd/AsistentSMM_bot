@@ -3,6 +3,7 @@ const cheerio = require("cheerio");
 const fetch = require("node-fetch");
 const FormData = require("form-data"); // Ensure you use form-data in Node.js
 const { normalizeUrl, safeUrl } = require("../../utils/telegramMediaSafe");
+const { downloadSingleImage } = require("../../services/imageDownloader");
 
 // Function to upload an image from a URL to 999.md
 async function uploadImageFromURL999(ctx, imageSrc) {
@@ -17,8 +18,19 @@ async function uploadImageFromURL999(ctx, imageSrc) {
     console.log("📸 [uploadImageFromURL999] Final image URL before request:", cleanUrl);
 
     // Fetch the image data as a buffer
-    const response = await axios.get(cleanUrl, { responseType: "arraybuffer" });
-    const imageBuffer = Buffer.from(response.data);
+    // OPTIMIZED: Direct axios download for ALL URLs (simpalsmedia + others).
+    // NO Puppeteer needed — direct .jpg URLs work fine with axios + proper headers.
+    const downloadResult = await downloadSingleImage(cleanUrl, {
+      timeout: 30000,
+      maxRetries: 3,
+    });
+
+    if (!downloadResult.success || !downloadResult.buffer) {
+      console.error("❌ [uploadImageFromURL999] Download failed for URL:", cleanUrl, downloadResult.error);
+      return null;
+    }
+
+    const imageBuffer = downloadResult.buffer;
 
     // Create form data for the file upload
     const form = new FormData();
@@ -97,8 +109,29 @@ async function extractRegion(ctx) {
   //                  Chisinau Municipiu
   const location = [{ id: "7", value: "12900" }];
 
+  // Determine the sector name (supports both Premier object format {ro: "Centru"} and 999.md scraper string format "Centru")
+  const sectorName = typeof ctx.session.data.sector === 'object' && ctx.session.data.sector !== null
+    ? ctx.session.data.sector.ro || ctx.session.data.sector.name
+    : ctx.session.data.sector;
+
+  const suburbName = typeof ctx.session.data.suburb === 'object' && ctx.session.data.suburb !== null
+    ? ctx.session.data.suburb.ro || ctx.session.data.suburb.name
+    : ctx.session.data.suburb;
+
+  // If we have no sector or suburb from scraped data, use map.md building location
+  if (!sectorName && !suburbName) {
+    console.log('[extractRegion] No sector/suburb in session data — using map.md building location');
+    if (mapObj?.data?.building?.street_name) {
+      location.push({ id: "10", value: mapObj.data.building.street_name });
+    }
+    if (mapObj?.data?.building?.number) {
+      location.push({ id: "11", value: mapObj.data.building.number });
+    }
+    return location;
+  }
+
   //daca este sector din premier din db => hardcodeaza id 8 cu chisinau si cauta care e id-ul sectorului
-  if (ctx.session.data.sector) {
+  if (sectorName) {
     location.push({ id: "8", value: "13859" });
 
     const sectoare = await axios.get(
@@ -114,15 +147,25 @@ async function extractRegion(ctx) {
       }
     );
 
-    const sector = sectoare.data.options.find(
-      (item) => item.title === ctx.session.data.sector.ro
+    // API returns "Options" (capital O) — handle both cases for safety
+    const sectorOptions = sectoare?.data?.Options || sectoare?.data?.options || [];
+    const sector = sectorOptions.find(
+      (item) => item.title === sectorName
     );
-    location.push({ id: "9", value: sector.id });
-    location.push({ id: "10", value: mapObj.data.building.street_name });
-    location.push({ id: "11", value: mapObj.data.building.number });
+    if (sector) {
+      location.push({ id: "9", value: sector.id });
+    } else {
+      console.warn('[extractRegion] ❌ Sector not found in API options:', sectorName);
+    }
+    if (mapObj?.data?.building?.street_name) {
+      location.push({ id: "10", value: mapObj.data.building.street_name });
+    }
+    if (mapObj?.data?.building?.number) {
+      location.push({ id: "11", value: mapObj.data.building.number });
+    }
   }
   //daca este suburb => cauta care e id 8 (bubuieci, bacioi etc) si 9 hardcodeaza-l la centru
-  else {
+  else if (suburbName) {
     const suburbii = await axios.get(
       `https://partners-api.999.md/dependent_options?subcategory_id=1404&dependency_feature_id=7&parent_option_id=12900&lang=ro`,
       {
@@ -135,9 +178,26 @@ async function extractRegion(ctx) {
         },
       }
     );
-    const suburbId = suburbii.data.options.find(
-      (item) => item.title === ctx.session.data.suburb.ro
-    ).id;
+
+    // API returns "Options" (capital O) — handle both cases for safety
+    const suburbOptions = suburbii?.data?.Options || suburbii?.data?.options || [];
+    const suburbMatch = suburbOptions.find(
+      (item) => item.title === suburbName
+    );
+
+    if (!suburbMatch) {
+      console.warn('[extractRegion] ❌ Suburb not found in API options:', suburbName);
+      // Return basic location if suburb not found
+      if (mapObj?.data?.building?.street_name) {
+        location.push({ id: "10", value: mapObj.data.building.street_name });
+      }
+      if (mapObj?.data?.building?.number) {
+        location.push({ id: "11", value: mapObj.data.building.number });
+      }
+      return location;
+    }
+
+    const suburbId = suburbMatch.id;
     location.push({ id: "8", value: suburbId });
 
     const suburbSect = await axios.get(
@@ -152,9 +212,17 @@ async function extractRegion(ctx) {
         },
       }
     );
-    location.push({ id: "9", value: suburbSect.data.options[0].id });
-    location.push({ id: "10", value: mapObj.data.building.street_name });
-    location.push({ id: "11", value: mapObj.data.building.number });
+
+    const suburbSectOptions = suburbSect?.data?.Options || suburbSect?.data?.options || [];
+    if (suburbSectOptions.length > 0) {
+      location.push({ id: "9", value: suburbSectOptions[0].id });
+    }
+    if (mapObj?.data?.building?.street_name) {
+      location.push({ id: "10", value: mapObj.data.building.street_name });
+    }
+    if (mapObj?.data?.building?.number) {
+      location.push({ id: "11", value: mapObj.data.building.number });
+    }
   }
   return location;
 }
@@ -782,25 +850,31 @@ const postTo999 = async (ctx) => {
   // ctx.session.data.thumbnails which was undefined, resulting in 0 uploaded images.
   const uploadedImagesIds = []; // Array to hold the uploaded image IDs
   const imagesToUpload = ctx.session.data.images || ctx.session.data.thumbnails || [];
-  console.log('[UPLOAD LOOP INPUT] images array length:', imagesToUpload.length);
-  console.log('[UPLOAD LOOP INPUT] first 3 URLs:', JSON.stringify(imagesToUpload.slice(0, 3)));
 
+  console.log("");
+  console.log("───────────────────────────────────────────────────────────");
+  console.log(`📤 [999.md] UPLOAD ${imagesToUpload.length} IMAGINI`);
+  console.log("───────────────────────────────────────────────────────────");
+
+  let uploadIndex = 0;
   for (const image of imagesToUpload) {
+    uploadIndex++;
     // Support both string URLs and { url } objects
     const imageUrl = typeof image === 'string' ? image : (image?.url || image?.src || null);
     if (imageUrl) {
       // Upload image and collect the uploaded image ID
-      console.log('[UPLOADING IMAGE]', imageUrl);
+      console.log(`  📤 [${uploadIndex}/${imagesToUpload.length}] Upload: ${imageUrl.slice(0, 60)}...`);
       const imageId = await uploadImageFromURL999(ctx, imageUrl);
       if (imageId) {
         uploadedImagesIds.push(imageId);
-        console.log("[UPLOADED IMAGE ID]", imageId, "for", imageUrl);
+        console.log(`  ✅ [${uploadIndex}/${imagesToUpload.length}] ID: ${imageId}`);
       } else {
-        console.log("Eroare la procesarea imaginii:", imageUrl);
+        console.log(`  ❌ [${uploadIndex}/${imagesToUpload.length}] Eșuat`);
       }
     }
   }
-  console.log('[UPLOADED IMAGE IDS total]', uploadedImagesIds.length);
+  console.log(`📊 [999.md] Upload complet: ${uploadIndex} procesate, ${uploadedImagesIds.length} succes`);
+  console.log("───────────────────────────────────────────────────────────");
   // Log the uploaded image IDs
   let subcategory;
   let desc;

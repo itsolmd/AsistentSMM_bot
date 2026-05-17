@@ -139,7 +139,7 @@ function normalizeImageUrl(url) {
  *   1. map normalizeImageUrl on each entry
  *   2. filter(Boolean) to remove nulls
  *   3. remove duplicates (Set)
- *   4. cap at 10 images (Telegram safety limit)
+ *   4. cap at 20 images (then split into batches of 10 by caller)
  *
  * @param  {Array} imagesArray - Raw array of image URLs
  * @return {Array}             - Clean, deduplicated, limited array
@@ -171,9 +171,9 @@ function sanitizeImages(imagesArray) {
     console.log('[sanitizeImages] First 3 clean URLs:', JSON.stringify(unique.slice(0, 3)));
   }
 
-  // Step 4: cap at 10 (Telegram safety limit)
-  const capped = unique.slice(0, 10);
-  console.log('[sanitizeImages] FINAL count (capped at 10):', capped.length);
+  // Step 4: cap at 20 (Telegram safety limit)
+  const capped = unique.slice(0, 20);
+  console.log('[sanitizeImages] FINAL count (capped at 20):', capped.length);
   return capped;
 }
 

@@ -41,6 +41,8 @@ async function parseLoyal(url) {
           // else: skip relative non-http URLs (e.g. data:image, empty)
         }
       });
+      console.log(`📸 TOATE imaginile (${images.length}):`);
+      images.forEach((url, i) => console.log(`  ${i + 1}. ${url}`));
       const characteristics = $(".object-characters__item");
       const floorInfo = $(characteristics[0]).find("p").text().trim();
       const rooms = $(characteristics[1]).find("p").text().trim();

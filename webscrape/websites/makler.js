@@ -24,7 +24,9 @@
         images.push(fullImageUrl);
       }
     }
-  });console.log(images);
+  });
+  console.log(`📸 TOATE imaginile (${images.length}):`);
+  images.forEach((url, i) => console.log(`  ${i + 1}. ${url}`));
   
       const description = $("#anText").length > 0 ? $("#anText").text().trim() : "Descriere indisponibilă";
       console.log(description);

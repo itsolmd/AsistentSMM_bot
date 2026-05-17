@@ -132,6 +132,8 @@ const scrap_immobiliare = async (ctx, url) => {
   }
 
   objectToSend.images = [...images];
+  console.log(`📸 TOATE imaginile (${images.length}):`);
+  images.forEach((url, i) => console.log(`  ${i + 1}. ${url}`));
 
   const views = parseInt(
     views_element

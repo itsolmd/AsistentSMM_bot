@@ -1,6 +1,25 @@
 const axios = require("axios");
 const FormData = require("form-data");
+const https = require("https");
+const http = require("http");
 require("dotenv").config();
+
+/* ── HTTP Keep-Alive Agents (reuse connections) ── */
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 60000,
+  maxSockets: 25,
+  maxFreeSockets: 10,
+  timeout: 60000,
+});
+
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 60000,
+  maxSockets: 25,
+  maxFreeSockets: 10,
+  timeout: 60000,
+});
 
 async function uploadImageToStrapi(imageBuffer, ctx) {
   try {
@@ -40,7 +59,10 @@ async function uploadImageToStrapi(imageBuffer, ctx) {
       headers: {
         ...formData.getHeaders(),
         Authorization: `Bearer ${token}`,
+        Connection: "keep-alive",
       },
+      httpAgent,
+      httpsAgent,
       timeout: 30000,
     });
 

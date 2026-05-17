@@ -4,9 +4,11 @@ const { postToPremier } = require("./platforms/premier");
 
 const postRouter = async (ctx) => {
   try {
-    /*if meta => meta; if 999 => 999; if sitedb => sitedb*/
+    /*if meta => meta; if 999 => 999; if premier => premier; if sitedb => sitedb*/
     console.log("🔍 [postRouter] Post router called");
     console.log("🔍 [postRouter] Selected platforms:", ctx.session.selectedPlatforms);
+
+    const removeWatermark = ctx.session.removeWatermark === true;
 
     if (ctx.session.selectedPlatforms.includes("999")) {
       console.log("🔍 [postRouter] Posting to 999.md...");
@@ -15,6 +17,10 @@ const postRouter = async (ctx) => {
     if (ctx.session.selectedPlatforms.includes("meta")) {
       console.log("🔍 [postRouter] Posting to Meta (FB/Inst)...");
       await postToMeta(ctx);
+    }
+    if (ctx.session.selectedPlatforms.includes("premier")) {
+      console.log("🔍 [postRouter] Posting to Premier (Premierimobil.md)...");
+      await postToPremier(ctx.session.data, ctx, removeWatermark);
     }
     if (ctx.session.selectedPlatforms.length == 0) {
       await ctx.editMessageText("Nici o platforma nu a fost selectata.");

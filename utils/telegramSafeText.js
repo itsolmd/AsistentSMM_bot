@@ -90,15 +90,19 @@ function escapeTelegramText(text) {
   }
 
   // Replace each MarkdownV2 special character with a safe alternative.
-  // CRITICAL: Dots (.) and underscores (_) are NOT escaped because:
+  // CRITICAL: Dots (.) are NOT escaped because:
   //   - Messages use parse_mode: "Markdown" (NOT MarkdownV2)
   //   - Escaping dots breaks prices: "97.000 €" → "97\.000 \€" ✗
-  //   - Escaping underscores breaks IDs: "DB_Ap101563488" → "DB\_Ap101563488" ✗
   // BUG v2.1 FIXED: Removed `+` escaping. The `+` character is NOT special
   // in Telegram Markdown mode (only in MarkdownV2). Escaping `+` to `\+`
   // caused phone numbers to appear as "\+373..." in output.
+  // BUG v2.2 FIXED: Underscore (_) IS special in Telegram Markdown mode
+  // (italic marker). Unescaped underscores in IDs like "DB_Ap103576427"
+  // cause "Can't find end of the entity" parse errors. Escaping to "\_"
+  // displays correctly as a literal underscore in Markdown mode.
   return str
     .replace(/\*/g, "\\*")    // asterisk
+    .replace(/_/g, "\\_")     // underscore (italic in Markdown mode)
     .replace(/\[/g, "\\[")    // open bracket
     .replace(/\]/g, "\\]")    // close bracket
     .replace(/\(/g, "\\(")    // open parenthesis

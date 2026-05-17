@@ -42,14 +42,12 @@ function buildTelegramLocation(parsedLocation) {
   return formatted || 'N/A';
 }
 
-const sendMessage = (
-  data,
-  ctx,
-  userAdId,
-  description = data.description || "",
-  images = (ctx.session.data && ctx.session.data.images) || [],
-  edited = false
-) => {
+/**
+ * buildCaptionText(data, ctx, userAdId, description)
+ * Returns ONLY the caption text (string), without generating media items.
+ * Used by linkRouter to build media groups per batch.
+ */
+function buildCaptionText(data, ctx, userAdId, description = data.description || "") {
   let message = "";
 
   // ── Dacă scraperul a returnat deja textul formatat, îl folosim direct ──
@@ -102,10 +100,31 @@ const sendMessage = (
     }
   }
 
-  return images.slice(0, 10).map((url, index) => ({
+  return message;
+}
+
+/**
+ * sendMessage(data, ctx, userAdId, description, images, edited)
+ * Legacy function — returns media group array for given images.
+ * Caption is placed on the LAST image of the array.
+ * NOTE: The caller is responsible for splitting images into batches of 10
+ * BEFORE calling this function, or for using buildCaptionText() + manual
+ * batching (preferred for multi-batch scenarios).
+ */
+const sendMessage = (
+  data,
+  ctx,
+  userAdId,
+  description = data.description || "",
+  images = (ctx.session.data && ctx.session.data.images) || [],
+  edited = false
+) => {
+  const message = buildCaptionText(data, ctx, userAdId, description);
+
+  return images.map((url, index) => ({
     type: "photo",
     media: edited ? { source: url } : url,
-    caption: index === 0 ? message : "",
+    caption: index === images.length - 1 ? message : "",
   }));
 };
 
@@ -113,4 +132,4 @@ function escapeMarkdown(text) {
   return String(text).replace(/([_*[\]()])/g, "\\$1");
 }
 
-module.exports = { sendMessage };
+module.exports = { sendMessage, buildCaptionText, escapeMarkdown };

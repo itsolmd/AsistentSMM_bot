@@ -3,9 +3,9 @@ const { MongoClient, ObjectId } = require("mongodb");
 require("dotenv").config();
 const { linkRouter } = require("./webscrape/linkRouter");
 const { postRouter } = require("./post/postRouter");
-const { sendMessage } = require("./utils/message_main");
+const { sendMessage, buildCaptionText } = require("./utils/message_main");
 const { getDescription } = require("./bot_actions/bot_redact");
-const { removeWatermark } = require("./utils/dewatermarking");
+const { removeWatermark } = require("./WaterMark-services/dewatermarking");
 const axios = require("axios");
 const sharp = require("sharp");
 const { postToPremier } = require("./post/platforms/premier");
@@ -456,6 +456,7 @@ bot.action(/^select_agent_(.*)$/, checkUser, async (ctx) => {
   const platformButtons = [
     { name: "FB/Inst", value: "meta" },
     { name: "999.md", value: "999" },
+    { name: "Premier", value: "premier" },
   ].map((platform) =>
     Markup.button.callback(
       `${
@@ -487,6 +488,7 @@ bot.action(/^select_platform_(.*)$/, checkUser, async (ctx) => {
   const platformButtons = [
     { name: "FB/Inst", value: "meta" },
     { name: "999.md", value: "999" },
+    { name: "Premier", value: "premier" },
   ].map((platform) =>
     Markup.button.callback(
       `${
@@ -509,13 +511,57 @@ bot.action(/^select_platform_(.*)$/, checkUser, async (ctx) => {
 
 bot.action("confirm_platforms", checkUser, async (ctx) => {
   try {
-    ctx.editMessageText("Postare in executie...");
-    logger.info("GENERAL", "Post platforms confirmed", { platforms: ctx.session.selectedPlatforms });
+    watchdog.recordActivity();
+    const selected = ctx.session.selectedPlatforms || [];
+    if (selected.length === 0) {
+      return ctx.editMessageText("Nicio platformă selectată. Alegeți cel puțin una.");
+    }
+
+    logger.info("GENERAL", "Platforms selected, asking about watermark", { platforms: selected });
+
+    // Ask about watermark removal BEFORE posting
+    await ctx.editMessageText(
+      "Scoatem watermarkul de pe toate pozele?",
+      Markup.inlineKeyboard([
+        Markup.button.callback("Da", "watermark_yes_post"),
+        Markup.button.callback("Nu", "watermark_no_post"),
+      ])
+    );
+  } catch (error) {
+    watchdog.recordError();
+    logger.error("GENERAL", "Error in confirm_platforms", { error: error.message });
+    ctx.reply("A avut loc o eroare la pregătirea publicării.");
+  }
+});
+
+// Handle watermark answer — Da — then post to all selected platforms
+bot.action("watermark_yes_post", checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    ctx.session.removeWatermark = true;
+    await ctx.editMessageText("Postare în execuție cu eliminare watermark...");
+    logger.info("GENERAL", "Posting with watermark removal", { platforms: ctx.session.selectedPlatforms });
     await postRouter(ctx);
     ctx.session.selectedPlatforms = [];
   } catch (error) {
     watchdog.recordError();
-    logger.error("GENERAL", "Error in confirm_platforms", { error: error.message });
+    logger.error("GENERAL", "Error in watermark_yes_post", { error: error.message });
+    ctx.reply("A avut loc o eroare la publicare.");
+  }
+});
+
+// Handle watermark answer — Nu — then post to all selected platforms
+bot.action("watermark_no_post", checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    ctx.session.removeWatermark = false;
+    await ctx.editMessageText("Postare în execuție...");
+    logger.info("GENERAL", "Posting without watermark removal", { platforms: ctx.session.selectedPlatforms });
+    await postRouter(ctx);
+    ctx.session.selectedPlatforms = [];
+  } catch (error) {
+    watchdog.recordError();
+    logger.error("GENERAL", "Error in watermark_no_post", { error: error.message });
     ctx.reply("A avut loc o eroare la publicare.");
   }
 });
@@ -531,43 +577,98 @@ bot.action("edit", checkUser, async (ctx) => {
     logger.info("GENERAL", "Edit action triggered");
 
     const redactedDesc = await getDescription(ctx.session.data);
-    const imageUrls = ctx.session.data.images;
+    const imageUrls = ctx.session.data.images || [];
 
+    // ── PARALLEL PIPELINE: download + watermark removal ──
+    // REPLACED: old sequential Puppeteer loop with parallel pipeline.
+    // Uses: axios download (NO Puppeteer), p-limit concurrency, retry logic.
+    const { downloadImagesParallel, cleanupBuffers } = require("./services/imageDownloader");
+
+    // Normalize URLs
+    const normalizedUrls = imageUrls
+      .map((url) => safeUrl(normalizeUrl(url)))
+      .filter(Boolean);
+
+    if (normalizedUrls.length === 0) {
+      logger.error("GENERAL", "No valid image URLs for edit");
+      return ctx.reply("Nu s-au găsit imagini valide pentru editare.");
+    }
+
+    // Step 1: Download all images IN PARALLEL (NO Puppeteer)
+    console.log(`[edit] Downloading ${normalizedUrls.length} images in parallel...`);
+    const downloadResults = await downloadImagesParallel(normalizedUrls, {
+      concurrency: 5,
+      timeout: 30000,
+      maxRetries: 3,
+    });
+
+    const successfulDownloads = downloadResults.filter((r) => r.success);
+
+    // Step 2: Process watermarks in parallel
+    const { default: pLimit } = await import("p-limit");
+    const watermarkLimit = pLimit(3);
     const dewatermarkedImages = [];
-    for (const imageUrl of imageUrls) {
-      try {
-        // ── URL SAFETY: normalize and validate before request ──
-        const cleanUrl = safeUrl(normalizeUrl(imageUrl));
-        if (!cleanUrl) {
-          logger.error("GENERAL", "Invalid image URL rejected in edit", { url: imageUrl });
-          continue;
+
+    const watermarkTasks = successfulDownloads.map((download) =>
+      watermarkLimit(async () => {
+        try {
+          const dewatermarkResult = await removeWatermark(download.buffer);
+          if (dewatermarkResult.success && dewatermarkResult.buffer) {
+            const jpgBuffer = await sharp(dewatermarkResult.buffer).jpeg().toBuffer();
+            return jpgBuffer;
+          }
+          // Fallback to original
+          console.warn("[edit] ⚠️ Watermark removal failed, using original");
+          return await sharp(download.buffer).jpeg().toBuffer();
+        } catch (err) {
+          console.error("[edit] ❌ Watermark exception, using original:", err.message);
+          try {
+            return await sharp(download.buffer).jpeg().toBuffer();
+          } catch {
+            return null;
+          }
         }
+      })
+    );
 
-        const imageResponse = await axios.get(cleanUrl, {
-          responseType: "arraybuffer",
-          timeout: 15000,
-        });
-        const imageBuffer = Buffer.from(imageResponse.data);
-
-        const dewatermarkedBuffer = await removeWatermark(imageBuffer);
-
-        const jpgBuffer = await sharp(dewatermarkedBuffer).jpeg().toBuffer();
-
-        dewatermarkedImages.push(jpgBuffer);
-      } catch (imgErr) {
-        logger.error("GENERAL", "Image processing failed in edit", { url: imageUrl, error: imgErr.message });
+    const results = await Promise.allSettled(watermarkTasks);
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) {
+        dewatermarkedImages.push(r.value);
       }
     }
-    await ctx.replyWithMediaGroup(
-      sendMessage(
-        ctx.session.data,
-        ctx,
-        userAdId,
-        redactedDesc,
-        dewatermarkedImages,
-        true
-      )
-    );
+
+    // Cleanup download buffers
+    cleanupBuffers(downloadResults);
+
+    console.log(`[edit] Processed ${dewatermarkedImages.length} images for editing`);
+
+    // Build caption text ONCE
+    const editCaptionText = buildCaptionText(ctx.session.data, ctx, userAdId, redactedDesc);
+
+    // Split dewatermarked buffers into batches of 10 FIRST
+    const editBatches = [];
+    for (let i = 0; i < dewatermarkedImages.length; i += 10) {
+      editBatches.push(dewatermarkedImages.slice(i, i + 10));
+    }
+
+    console.log(`[edit] Sending ${editBatches.length} batch(es) of edited images...`);
+
+    // Send each batch — caption ONLY on last image of LAST batch
+    for (let batchIdx = 0; batchIdx < editBatches.length; batchIdx++) {
+      const batch = editBatches[batchIdx];
+      const isLastBatch = batchIdx === editBatches.length - 1;
+
+      const mediaGroup = batch.map((imgBuffer, imgIdx) => ({
+        type: "photo",
+        media: { source: imgBuffer },
+        ...(isLastBatch && imgIdx === batch.length - 1
+          ? { caption: editCaptionText, parse_mode: "Markdown" }
+          : {}),
+      }));
+
+      await ctx.replyWithMediaGroup(mediaGroup);
+    }
   } catch (error) {
     watchdog.recordError();
     logger.error("GENERAL", "Error during image processing", { error: error.message });
@@ -579,7 +680,7 @@ bot.action("edit", checkUser, async (ctx) => {
    BOT LAUNCH
    ════════════════════════════════════════════════════════════════ */
 
-bot.launch()
+bot.launch({ dropPendingUpdates: true })
   .then(() => {
     const now = Date.now();
     logger.info("GENERAL", "✅ Bot launched successfully!");

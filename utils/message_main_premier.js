@@ -81,12 +81,12 @@ const sendMessageFromPremier = (ctx) => {
       ctx.session.user.name.split(" ")[0]
     }\n`;
   }
-  //let message = "test";
-  return ctx.session.data.thumbnails.slice(0, 10).map((thumbnail, index) => ({
+  // Return thumbnails without caption; caption will be added later in batches
+  const thumbnails = ctx.session.data.thumbnails.map((thumbnail) => ({
     type: "photo",
     media: thumbnail.url,
-    caption: index === 0 ? message : "",
   }));
+  return { thumbnails, captionText: message };
 };
 
 module.exports = { sendMessageFromPremier };

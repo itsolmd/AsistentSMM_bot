@@ -4,11 +4,12 @@ const FormData = require("form-data");
 const fs = require("fs");
 const path = require("path");
 require("dotenv").config();
-const { removeWatermark } = require("../../utils/dewatermarking");
+const { removeWatermark } = require("../../WaterMark-services/dewatermarking");
 const { getFilter } = require("../../utils/filters");
 const { normalizeUrl, safeUrl, sanitizeText } = require("../../utils/telegramMediaSafe");
 const { uploadImageToStrapi } = require("../../utils/uploadImagStrapi");
 const { geocodeWithFallback } = require('../../utils/geolocNominatim');      // Nominatim OSM geocoder
+const { processImagePipeline } = require("../../services/uploadManager");
 // const { scrap_999, GeoLoc } = require("../../webscrape/websites/999");
 
 /**
@@ -298,73 +299,55 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
     ].filter(Boolean);
   }
 
-  console.log("🔍 [postToPremier] Obiectul de date trimis:", JSON.stringify(data, null, 2));
-  console.log("🔍 [postToPremier] Se pregătește postarea pe premier.md!");
+  console.log("");
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("🏢 [POST TO PREMIER] ÎNCEPE POSTAREA");
+  console.log("═══════════════════════════════════════════════════════════");
 
-  // ── IMAGE UPLOAD ──
-  const uploadedImageIds = [];
+  // ── IMAGE UPLOAD (PARALLEL PIPELINE) ──
+  // REPLACED: old sequential Puppeteer loop with parallel pipeline.
+  // Uses: axios download (NO Puppeteer), p-limit concurrency, retry logic.
+  let uploadedImageIds = [];
 
-  // Guard: ensure data.images is an array before iterating
-  if (!Array.isArray(data.images)) {
-    console.warn("⚠️ [postToPremier] data.images is not an array — treating as empty. Value:", data.images);
-    data.images = [];
-  }
-
-  // Deduplicate image URLs to avoid uploading the same image twice
-  const uniqueImageUrls = [...new Set(data.images)];
-  console.log('[postToPremier] IMAGE UPLOAD LOOP: total unique images to process:', uniqueImageUrls.length);
-  if (uniqueImageUrls.length > 0) {
-    console.log('[postToPremier] First 3 image URLs:', JSON.stringify(uniqueImageUrls.slice(0, 3)));
-  }
-  if (uniqueImageUrls.length < data.images.length) {
-    console.log("🔁 [postToPremier] Removed", data.images.length - uniqueImageUrls.length, "duplicate image URL(s)");
-  }
-
-  for (const imageUrl of uniqueImageUrls) {
-    // ── URL SAFETY: normalize and validate before request ──
-    console.log('[postToPremier] Processing image URL:', imageUrl);
-    const cleanUrl = safeUrl(normalizeUrl(imageUrl));
-    if (!cleanUrl) {
-      console.error("❌ [postToPremier] Invalid image URL rejected:", imageUrl);
-      continue; // skip this image, don't crash
-    }
-    console.log("📸 [postToPremier] Final image URL before request:", cleanUrl);
-
-    let response;
-    try {
-      response = await axios.get(cleanUrl, {
-        responseType: "arraybuffer",
-        timeout: 15000,
-      });
-    } catch (axiosErr) {
-      console.error("❌ [postToPremier] Axios download failed for URL:", cleanUrl, axiosErr.message);
-      continue; // skip this image, don't crash
-    }
-    const imageBuffer = Buffer.from(response.data);
-
-    let finalImageBuffer = imageBuffer;
-
-    // Only remove watermark if the flag is true
-    if (removeWatermarkFlag) {
-      finalImageBuffer = await removeWatermark(imageBuffer);
+  // If data.uploadedImageIds is already set (from postingWorker), skip re-upload
+  if (Array.isArray(data.uploadedImageIds) && data.uploadedImageIds.length > 0) {
+    uploadedImageIds = data.uploadedImageIds;
+    console.log(`  📸 Folosire IDs deja încărcate: [${uploadedImageIds.join(", ")}]`);
+  } else {
+    // Guard: ensure data.images is an array before processing
+    if (!Array.isArray(data.images)) {
+      console.warn("  ⚠️ data.images nu e array — se tratează ca gol");
+      data.images = [];
     }
 
-    // Upload the image (with or without watermark removal)
-    const imageId = await uploadImageToStrapi(finalImageBuffer, ctx);
-    if (imageId) {
-      uploadedImageIds.push(imageId);
-      console.log("✅ Sa procesat imaginea spre Premierimobil.md: " + imageUrl + " → ID:", imageId);
+    if (data.images.length > 0) {
+      console.log(`  📸 Pornire pipeline paralel pentru ${data.images.length} imagini...`);
+
+      // Run the parallel pipeline - downloads with axios (NO Puppeteer),
+      // removes watermarks if flag is set, uploads to Strapi with keep-alive
+      const pipelineResult = await processImagePipeline(
+        data,
+        ctx,
+        removeWatermarkFlag,
+        {
+          downloadConcurrency: 5,
+          uploadConcurrency: 3,
+          downloadTimeout: 30000,
+          uploadTimeout: 30000,
+          maxRetries: 3,
+          keepAllImages: true, // ALL images preserved, no cap
+        }
+      );
+
+      uploadedImageIds = pipelineResult.uploadedIds;
+
+      console.log(`  📊 Pipeline: ${pipelineResult.successCount} succes, ${pipelineResult.failCount} eșuat, ${pipelineResult.skippedCount} sărite (${pipelineResult.durationMs}ms)`);
     } else {
-      console.warn("⚠️ [postToPremier] Image upload returned null for:", imageUrl);
+      console.warn("  ⚠️ Nicio imagine de procesat");
     }
   }
 
-  console.log("📸 [postToPremier] Total uploaded image IDs:", uploadedImageIds);
-
-  // ── DEBUG: Strapi model keys & image IDs (BUG REPAIR) ──────────
-  console.log('[STRAPI MODEL KEYS] Available data keys:', Object.keys(data));
-  console.log('[STRAPI IMAGE IDS] Uploaded image IDs:', JSON.stringify(uploadedImageIds));
-  console.log('[STRAPI IMAGE IDS] Count:', uploadedImageIds.length);
+  console.log(`  📸 Total IDs încărcate: ${uploadedImageIds.length} [${uploadedImageIds.join(", ")}]`);
 
   // ── TYPE NORMALIZATION ──────────────────────────────────────────
   // Map all possible data.type values from different scrapers to canonical types

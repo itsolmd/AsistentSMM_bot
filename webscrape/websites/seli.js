@@ -72,9 +72,10 @@
         })
         .get()
         .filter(Boolean);
-  
-      // console.log("Toate imaginile extrase:", images);
-  
+
+      console.log(`📸 TOATE imaginile (${images.length}):`);
+      images.forEach((url, i) => console.log(`  ${i + 1}. ${url}`));
+
       function getHighResImages(images, sourceUrl) {
         const urlHost = new URL(sourceUrl).host;
       
