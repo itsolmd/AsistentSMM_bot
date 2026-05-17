@@ -18,7 +18,7 @@ const axios                      = require("axios");
 const { sendMessageFromPremier } = require("../utils/message_main_premier");
 
 // Watermark removal service
-const { processListingImages }   = require("../WaterMark-services/watermark");
+const { processListingImages }   = require("../WaterMark-services/Dewatermark");
 
 /*───────────────────────────────────────────────────────────*/
 /* Helpers                                                   */
