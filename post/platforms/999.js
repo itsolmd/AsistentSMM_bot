@@ -238,6 +238,10 @@ const extractFeaturesId = async (ctx, type) => {
     typeID = 1405;
   } else if (type === "terrains") {
     typeID = 1407;
+  } else {
+    throw new Error(
+      `Tip imobil necunoscut: "${type}". Valori acceptate: apartments, houses, commercials, terrains.`
+    );
   }
   const features = await axios.get(
     `https://partners-api.999.md/features?category_id=270&subcategory_id=${typeID}&offer_type=776&lang=ro`,

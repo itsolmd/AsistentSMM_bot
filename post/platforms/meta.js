@@ -57,53 +57,73 @@ function getMetaSerie(ctx) {
   return null;
 }
 
-async function postToMeta(ctx, mediaGroupProcessed = true) {
+/**
+ * Build a clean address line for Meta posts (street-level detail).
+ */
+function getMetaAddressLine(ctx) {
+  const p = ctx.session.data.parsedLocation;
+  if (!p) return null;
+  const parts = [];
+  if (p.street) parts.push(p.street);
+  if (p.streetNumber) parts.push(p.streetNumber);
+  return parts.length ? parts.join(', ') : null;
+}
+
+/**
+ * Build a structured, emoji-formatted description for Meta (FB/IG) posts.
+ */
+function buildMetaDescription(ctx) {
   const imobilType = getMetaPropertyType(ctx);
   const locationText = getMetaLocation(ctx);
-  let desc;
+  const addressLine = getMetaAddressLine(ctx);
+  const data = ctx.session.data;
+  const price = data.price ? `${data.price} €` : 'N/A';
+
+  // Common block: location & price
+  let lines = [];
+  lines.push(`📍 Locație: ${locationText}${addressLine ? `, ${addressLine}` : ''}`);
+  lines.push(`💰 Preț: ${price}`);
 
   if (imobilType === "apartments") {
     const serie = getMetaSerie(ctx);
-    desc = `In vânzare apartament${serie ? ` seria ${serie}` : ""}, amplasat în ${locationText}.
-        Locuința se desfășoară pe o suprafață de ${
-          ctx.session.data.area || "N/A"
-        } m2, localizat la etajul ${ctx.session.data.floor || "N/A"} din ${
-      ctx.session.data.floors || "N/A"
-    }, fiind compartimentat în: ${
-      ctx.session.data.rooms == 1
-        ? "1 cameră"
-        : `${ctx.session.data.rooms || "N/A"} camere`
-    }, bucătărie,
-         ${
-           ctx.session.data.bathrooms == 1
-             ? "1 bloc sanitar"
-             : `${ctx.session.data.bathrooms || "N/A"} blocuri sanitare`
-         } și antreu.`;
+    if (serie) lines.push(`🏗️ Serie: ${serie}`);
+    lines.push(`🛏️ Dormitoare: ${data.rooms || 'N/A'}`);
+    lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
+    lines.push(`🏢 Etaj: ${data.floor || 'N/A'}/${data.floors || 'N/A'}`);
+    lines.push(`🚽 Băi: ${data.bathrooms || '1'}`);
+    if (data.building) lines.push(`🏗️ Bloc: ${data.building}`);
   } else if (imobilType === "houses") {
-    desc = `In vânzare casă, amplasată în ${locationText}.
-        Locuința se desfășoară pe o suprafață de ${
-          ctx.session.data.area || "N/A"
-        } m2, având ${ctx.session.data.floors || "N/A"} nivele, fiind compartimentat în: ${
-      ctx.session.data.rooms == 1
-        ? "1 cameră"
-        : `${ctx.session.data.rooms || "N/A"} camere`
-    }, bucătărie,
-         ${
-           ctx.session.data.bathrooms == 1
-             ? "1 bloc sanitar"
-             : `${ctx.session.data.bathrooms || "N/A"} blocuri sanitare`
-         }.`;
+    lines.push(`🛏️ Dormitoare: ${data.rooms || 'N/A'}`);
+    lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
+    lines.push(`📐 Nivele: ${data.floors || 'N/A'}`);
+    lines.push(`🚽 Băi: ${data.bathrooms || '1'}`);
   } else if (imobilType === "commercials") {
-    const destination = ctx.session.data.commercial_destination?.ro || ctx.session.data.commercial_destination || "spațiu comercial";
-    desc = `In vânzare ${destination}, amplasat în ${locationText}.
-      Se desfășoară pe o suprafață de ${ctx.session.data.area || "N/A"} m2.`;
+    const destination = data.commercial_destination?.ro || data.commercial_destination || 'Spațiu comercial';
+    lines.push(`🏢 Tip: ${destination}`);
+    lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
   } else if (imobilType === "terrains") {
-    const destination = ctx.session.data.terrain_destination?.ro || ctx.session.data.terrain_destination || "lot de pamant";
-    desc = `In vânzare ${destination}, amplasat în ${locationText}. Se desfășoară pe o suprafață de ${ctx.session.data.area || "N/A"} m2.`;
-  } else {
-    // Fallback description
-    desc = `In vânzare proprietate imobiliară, amplasată în ${locationText}.`;
+    const destination = data.terrain_destination?.ro || data.terrain_destination || 'Lot de teren';
+    lines.push(`🌿 Tip: ${destination}`);
+    lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
   }
+
+  // Contact info
+  if (data.phone || ctx.session.user?.phoneNr) {
+    const phone = data.phone || ctx.session.user.phoneNr;
+    const contactName = ctx.session.user?.name?.split(' ')[0] || '';
+    lines.push(`📞 ${phone}${contactName ? ` | ${contactName}` : ''}`);
+  }
+
+  // External ID if present
+  if (data.externalId || data.id) {
+    lines.push(`🆔 ${data.externalId || data.id}`);
+  }
+
+  return lines.join('\n');
+}
+
+async function postToMeta(ctx, mediaGroupProcessed = true) {
+  const desc = buildMetaDescription(ctx);
   try {
     const graph = `https://graph.facebook.com/v21.0`;
     const pagesResponse = await axios.get(`${graph}/me/accounts`, {
