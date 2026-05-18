@@ -16,7 +16,14 @@ const postRouter = async (ctx) => {
     }
     if (ctx.session.selectedPlatforms.includes("meta")) {
       console.log("🔍 [postRouter] Posting to Meta (FB/Inst)...");
-      await postToMeta(ctx);
+      const metaResult = await postToMeta(ctx);
+      if (metaResult && metaResult.fb) {
+        let linksMsg = `✅ Facebook: ${metaResult.fb}`;
+        if (metaResult.inst) {
+          linksMsg += `\n✅ Instagram: ${metaResult.inst}`;
+        }
+        await ctx.reply(linksMsg);
+      }
     }
     if (ctx.session.selectedPlatforms.includes("premier")) {
       console.log("🔍 [postRouter] Posting to Premier (Premierimobil.md)...");

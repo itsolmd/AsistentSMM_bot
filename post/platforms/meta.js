@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { getCollection } = require("../../db");
 
 /**
  * Extract a human-readable location string from session data,
@@ -72,31 +73,57 @@ function getMetaAddressLine(ctx) {
 /**
  * Build a structured, emoji-formatted description for Meta (FB/IG) posts.
  */
-function buildMetaDescription(ctx) {
+function buildMetaDescription(ctx, phoneFromDb = '') {
   const imobilType = getMetaPropertyType(ctx);
   const locationText = getMetaLocation(ctx);
   const addressLine = getMetaAddressLine(ctx);
   const data = ctx.session.data;
   const price = data.price ? `${data.price} €` : 'N/A';
 
-  // Common block: location & price
+  // Map property type slug to Romanian display name for title
+  const typeTitleMap = {
+    'apartments': 'Apartament',
+    'houses': 'Casă',
+    'commercials': 'Spațiu comercial',
+    'terrains': 'Teren',
+  };
+  const titleType = typeTitleMap[imobilType] || 'Imobil';
+
+  /**
+   * Normalize building type to simple "nou" or "secundar".
+   * "Construcţii noi", "Bloc nou", "nou" → "nou"
+   * "secundar", "vechi", "existent" → "secundar"
+   */
+  const normalizeBuilding = (building) => {
+    if (!building) return null;
+    if (/nou/i.test(building)) return 'nou';
+    return 'secundar';
+  };
+
   let lines = [];
-  lines.push(`📍 Locație: ${locationText}${addressLine ? `, ${addressLine}` : ''}`);
+
+  // Title line
+  lines.push(`În vânzare ${titleType}...`);
+
+  // Location with full address (no "Locație:" label)
+  const locationParts = [locationText];
+  if (addressLine) locationParts.push(addressLine);
+  lines.push(`📍 ${locationParts.join(', ')}`);
+
+  // Price
   lines.push(`💰 Preț: ${price}`);
 
+  // Property-specific details (no Serie, no Băi, no contact, no ID on Facebook)
   if (imobilType === "apartments") {
-    const serie = getMetaSerie(ctx);
-    if (serie) lines.push(`🏗️ Serie: ${serie}`);
     lines.push(`🛏️ Dormitoare: ${data.rooms || 'N/A'}`);
     lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
     lines.push(`🏢 Etaj: ${data.floor || 'N/A'}/${data.floors || 'N/A'}`);
-    lines.push(`🚽 Băi: ${data.bathrooms || '1'}`);
-    if (data.building) lines.push(`🏗️ Bloc: ${data.building}`);
+    const building = data.building ? normalizeBuilding(data.building) : null;
+    if (building) lines.push(`🏗️ Bloc: ${building}`);
   } else if (imobilType === "houses") {
     lines.push(`🛏️ Dormitoare: ${data.rooms || 'N/A'}`);
     lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
     lines.push(`📐 Nivele: ${data.floors || 'N/A'}`);
-    lines.push(`🚽 Băi: ${data.bathrooms || '1'}`);
   } else if (imobilType === "commercials") {
     const destination = data.commercial_destination?.ro || data.commercial_destination || 'Spațiu comercial';
     lines.push(`🏢 Tip: ${destination}`);
@@ -107,23 +134,53 @@ function buildMetaDescription(ctx) {
     lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
   }
 
-  // Contact info
-  if (data.phone || ctx.session.user?.phoneNr) {
-    const phone = data.phone || ctx.session.user.phoneNr;
-    const contactName = ctx.session.user?.name?.split(' ')[0] || '';
-    lines.push(`📞 ${phone}${contactName ? ` | ${contactName}` : ''}`);
+  // ── Contact phone ────────────────────────────────────────────
+  // Priority: 1) direct MongoDB query (phoneFromDb), 2) session user, 3) scraped ad data
+  const phone = phoneFromDb || ctx.session.user?.phoneNr || ctx.session.data?.phoneNr || '';
+  const userName = ctx.session.user?.name || '';
+  const firstName = userName ? userName.split(' ')[0] : '';
+  if (phone) {
+    const phoneDisplay = phone.startsWith('+') ? phone : `+${phone}`;
+    lines.push(`📞 ${phoneDisplay} (WhatsApp/Viber) - ${firstName}`);
   }
 
-  // External ID if present
-  if (data.externalId || data.id) {
-    lines.push(`🆔 ${data.externalId || data.id}`);
+  // ── DB ID from advertisement (e.g. 🆔DB_Ap101739166) ──────
+  // Priority:
+  //   1. advertId (set by 999.md scraper as "DB_Ap...")
+  //   2. data.id (Strapi/Premier document ID)
+  //   3. data._id (raw MongoDB ObjectId)
+  let advertId = ctx.session.data?.advertId;
+  if (!advertId && ctx.session.data?.id) {
+    advertId = `DB_Ap${ctx.session.data.id}`;
+  }
+  if (!advertId && ctx.session.data?._id) {
+    advertId = `DB_${String(ctx.session.data._id)}`;
+  }
+  if (advertId && advertId !== 'N/A') {
+    lines.push(`🆔${advertId}`);
   }
 
   return lines.join('\n');
 }
 
 async function postToMeta(ctx, mediaGroupProcessed = true) {
-  const desc = buildMetaDescription(ctx);
+  // ── Fetch phone number directly from MongoDB ─────────────────
+  let phoneFromDb = '';
+  try {
+    const usersCollection = await getCollection("users");
+    const mongoUser = await usersCollection.findOne(
+      { telegramChatID: ctx.chat.id.toString() },
+      { projection: { phoneNr: 1 } }
+    );
+    if (mongoUser?.phoneNr) {
+      phoneFromDb = mongoUser.phoneNr;
+      console.log('[postToMeta] 📞 Phone fetched from MongoDB:', phoneFromDb);
+    }
+  } catch (err) {
+    console.warn('[postToMeta] ⚠️ Could not fetch phone from MongoDB, falling back to session:', err.message);
+  }
+
+  const desc = buildMetaDescription(ctx, phoneFromDb);
   try {
     const graph = `https://graph.facebook.com/v21.0`;
     const pagesResponse = await axios.get(`${graph}/me/accounts`, {
@@ -141,6 +198,32 @@ async function postToMeta(ctx, mediaGroupProcessed = true) {
     if (!pageAccessToken) {
       return "facebook doesnt posted";
     }
+
+    // ── Pre-check Instagram availability BEFORE posting ─────────
+    let instagramId = null;
+    try {
+      const instagramAccountResponse = await axios.get(
+        `${graph}/${ctx.session.user.fb_page_id}?fields=instagram_business_account`,
+        {
+          headers: {
+            Authorization: `Bearer ${ctx.session.user.fb_acces_token}`,
+          },
+        }
+      );
+      if (instagramAccountResponse.data.instagram_business_account?.id) {
+        instagramId = instagramAccountResponse.data.instagram_business_account.id;
+      }
+    } catch (instErr) {
+      console.warn('[postToMeta] ⚠️ Instagram check failed:', instErr.response?.data || instErr.message);
+      // Non-fatal: proceed without Instagram
+    }
+
+    if (instagramId) {
+      console.log('[postToMeta] ✅ Instagram Business Account found:', instagramId);
+    } else {
+      console.log('[postToMeta] ℹ️ No Instagram Business Account linked — Instagram will be skipped.');
+    }
+
     const pageGraph = `${graph}/${ctx.session.user.fb_page_id}`;
     const photoIds = [];
     // Support both string URLs and { url } objects
@@ -179,27 +262,20 @@ async function postToMeta(ctx, mediaGroupProcessed = true) {
     const retValueFB = await axios.post(`${pageGraph}/feed`, params, {
       headers: { Authorization: `Bearer ${pageAccessToken}` },
     });
-    await ctx.reply("Postarea valabila pe Facebook.");
-    console.log("Successfully posted on Facebook!", retValueFB.data.id);
-    await ctx.reply("Postarea pe Instagram in executie...");
-    retValue.fb = retValueFB.data.id;
-    // Instagram posting
-    const instagramAccountResponse = await axios.get(
-      `${graph}/${ctx.session.user.fb_page_id}?fields=instagram_business_account`,
-      {
-        headers: {
-          Authorization: `Bearer ${ctx.session.user.fb_acces_token}`,
-        },
-      }
-    );
+    const fbPostId = retValueFB.data.id;
+    const fbPostLink = `https://www.facebook.com/${ctx.session.user.fb_page_id}/posts/${fbPostId}`;
+    await ctx.reply(`✅ Postarea pe Facebook: ${fbPostLink}`);
+    console.log("Successfully posted on Facebook!", fbPostId);
+    retValue.fb = fbPostLink;
 
-    if (!instagramAccountResponse.data.instagram_business_account) {
-      console.log("Instagram Business Account not found for this page.");
-      return;
+    // ── Gracefully skip Instagram if no Business Account linked ─
+    if (!instagramId) {
+      await ctx.reply('ℹ️ Postarea pe Instagram a fost omisă — pagina Facebook nu are un cont Instagram de business conectat. Pentru a publica pe Instagram, conectați un cont Instagram de business în setările paginii Facebook.');
+      retValue.inst = null;
+      return retValue;
     }
 
-    const instagramId =
-      instagramAccountResponse.data.instagram_business_account.id;
+    await ctx.reply("Postarea pe Instagram in executie...");
     const instContainersIds = [];
 
     // Create media containers for Instagram
@@ -257,12 +333,26 @@ async function postToMeta(ctx, mediaGroupProcessed = true) {
         },
       }
     );
-    retValue.inst = retValInst.data.id;
+    const instMediaId = retValInst.data.id;
     console.log(
       "The media has been published on Instagram successfully!",
-      retValInst.data.id
+      instMediaId
     );
-    await ctx.reply("Postarea valabila pe Instagram.");
+    // Fetch Instagram permalink
+    let instPostLink = '#';
+    try {
+      const instMediaResp = await axios.get(`${graph}/${instMediaId}`, {
+        params: { fields: 'permalink' },
+        headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` },
+      });
+      instPostLink = instMediaResp.data.permalink;
+    } catch (permalinkErr) {
+      console.warn('[postToMeta] Could not fetch Instagram permalink:', permalinkErr.message);
+      // Fallback: construct URL from media ID
+      instPostLink = `https://www.instagram.com/p/${instMediaId}/`;
+    }
+    await ctx.reply(`✅ Postarea pe Instagram: ${instPostLink}`);
+    retValue.inst = instPostLink;
     return retValue;
   } catch (error) {
     console.error("An error occurred:", error.response?.data || error.message);

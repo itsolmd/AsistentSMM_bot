@@ -16,7 +16,7 @@ All API requests must be made over HTTPS. Calls made over plain HTTP will fail. 
 Example request using cURL command-line tool:
 
 curl https://partners-api.999.md/categories \
-    --user "AxYcHhZsPqHTpthS2C_7xRmPoLK:"
+    --user "YOUR_999_API_KEY:"
 NOTE: cURL uses the -u flag to pass basic auth credentials (adding a colon after your API key prevents cURL from asking for a password).
 
 Errors ¶
@@ -49,14 +49,14 @@ If you don’t specify a language, the default language ru is used.
 Example request:
 
 curl 'https://partners-api.999.md/categories?lang=ro' \
-    --user "AxYcHhZsPqHTpthS2C_7xRmPoLK:"
+    --user "YOUR_999_API_KEY:"
 Pagination ¶
 Requests that return multiple items will be paginated to 30 items by default. You can specify further pages with the page parameter. You can also set a custom page size with the page_size parameter.
 
 Example request:
 
 curl 'https://partners-api.999.md/ads?page=2&page_size=50' \
-    --user "AxYcHhZsPqHTpthS2C_7xRmPoLK:"
+    --user "YOUR_999_API_KEY:"
 Note that page numbering is 1-based and that omitting the page parameter will return the first page.
 
 Images ¶
@@ -1410,7 +1410,7 @@ GET https://partners-api.999.md/adverts?page_size=5&page=2&lang=ru&states=public
 RequestscURL
 Body
 curl https://partners-api.999.md/adverts?page_size=10&page=2&states=public,hidden \
-    --user "AxYcHhZsPqHTpthS2C_7xRmPoLK:"
+    --user "YOUR_999_API_KEY:"
 Responses200
 Body
 {
@@ -1735,7 +1735,7 @@ RequestscURL
 Body
 curl https://partners-api.999.md/adverts/123456789/republish \
     --request "POST" \
-    --user "AxYcHhZsPqHTpthS2C_7xRmPoLK:"
+    --user "YOUR_999_API_KEY:"
 Responses200402
 Headers
 Content-Type: application/json

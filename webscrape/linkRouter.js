@@ -343,6 +343,54 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
   ctx.session.data = JSON.parse(JSON.stringify(adData));
   console.log('[linkRouter] session.data stored — keys:', Object.keys(ctx.session.data).join(', '));
 
+  // ── SET imobilType for non-Premier scrapers ───────────────────────
+  //    Premier sets ctx.session.imobilType from URL before calling
+  //    returnInfoInChat. For all other scrapers (999.md, immobiliare.md,
+  //    loyal.md), the type is stored in adData.type in various Romanian
+  //    formats. This mapping normalizes them to the English values
+  //    expected by post/platforms/999.js and other post modules.
+  // ──────────────────────────────────────────────────────────────────
+  if (!ctx.session.imobilType && adData?.type) {
+    const TYPE_MAP = {
+      // 999.md scraper format
+      'Apartament': 'apartments',
+      'Casă': 'houses',
+      'Comercial': 'commercials',
+      'Teren': 'terrains',
+      // immobiliare.md scraper format
+      'Apartamente': 'apartments',
+      'Case': 'houses',
+      'Imobiliare comerciale': 'commercials',
+      'Loturi de teren': 'terrains',
+      // loyal.md scraper format (if applicable)
+      'apartments': 'apartments',
+      'houses': 'houses',
+      'commercials': 'commercials',
+      'terrains': 'terrains',
+    };
+    const mappedType = TYPE_MAP[adData.type];
+    if (mappedType) {
+      ctx.session.imobilType = mappedType;
+      console.log('[linkRouter] imobilType set from adData.type:', adData.type, '→', mappedType);
+    } else {
+      // Fallback: detect from data fields
+      if (adData.rooms != null) {
+        ctx.session.imobilType = 'apartments';
+      } else if (adData.house_type) {
+        ctx.session.imobilType = 'houses';
+      } else if (adData.commercial_destination) {
+        ctx.session.imobilType = 'commercials';
+      } else if (adData.terrain_destination) {
+        ctx.session.imobilType = 'terrains';
+      }
+      if (ctx.session.imobilType) {
+        console.log('[linkRouter] imobilType inferred from data fields:', ctx.session.imobilType);
+      } else {
+        console.warn('[linkRouter] ⚠️ Could not determine imobilType from adData.type:', adData.type);
+      }
+    }
+  }
+
   // ── IMMEDIATE PERSIST to MongoDB: Save pendingAdData right after
   //    setting session.data. This ensures the data survives even if
   //    Telegraf's in-memory session store loses it before the text

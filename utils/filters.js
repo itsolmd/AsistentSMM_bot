@@ -378,7 +378,7 @@ const getLocationArray = async (str, ctx) => {
       {
         headers: { "Content-Type": "application/json" },
         auth: {
-          username: ctx?.session?.user?.token_999 || "",
+          username: ctx?.session?.user?.token_999,
           password: "",
         },
         timeout: 15000,
@@ -432,7 +432,7 @@ const getLocationArray = async (str, ctx) => {
       {
         headers: { "Content-Type": "application/json" },
         auth: {
-          username: ctx?.session?.user?.token_999 || "",
+          username: ctx?.session?.user?.token_999,
           password: "",
         },
         timeout: 15000,
