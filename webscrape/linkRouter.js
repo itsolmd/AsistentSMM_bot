@@ -11,6 +11,7 @@ const { sanitizeAdData }         = require("../utils/telegramSafeText");
 const { sanitizeImages }         = require("../utils/telegramMediaSafe");
 
 const { scrap_999 }              = require("./websites/999");
+const { scrap_premier }          = require("./websites/premier");
 const { scrap_immobiliare }      = require("./websites/immobiliare");
 const { parseLoyal }             = require("./websites/loyal");
 
@@ -203,11 +204,34 @@ const returnPremierOptions = async (ctx, db) => {
     const slug = ctx.message.text.trim().split("/").slice(-2).join("/");
     console.log("🔍 [returnPremierOptions] Fetching slug:", slug);
 
+    // ── Resolve Strapi backend URL: session-level first, env-level fallback ──
+    const sessionBackend = ctx?.session?.user?.strapi_backend;
+    const envBackend     = process.env.BACK_END;
+    const backend        = sessionBackend || envBackend;
+
+    if (!backend) {
+      console.error("❌ [returnPremierOptions] No Strapi backend URL available (session or env)");
+      return ctx.reply("Eroare de configurare: URL-ul backend-ului Strapi nu este disponibil. Contactați administratorul.");
+    }
+
+    // ── Resolve Strapi token: session-level first, env-level fallback ──
+    const sessionToken = ctx?.session?.user?.strapi_token;
+    const envToken     = process.env.STRAPI_TOKEN;
+    const token        = sessionToken || envToken;
+
+    if (!token) {
+      console.error("❌ [returnPremierOptions] No Strapi token available (session or env)");
+      return ctx.reply("Eroare de configurare: Token-ul Strapi nu este disponibil. Contactați administratorul.");
+    }
+
+    console.log(`🔍 [returnPremierOptions] Using backend: ${backend} (source: ${sessionBackend ? 'session' : 'env'})`);
+    console.log(`🔍 [returnPremierOptions] Using token: ${token.slice(0, 8)}... (source: ${sessionToken ? 'session' : 'env'})`);
+
     const { data } = await axios.get(
-      `http://${ctx.session.user.strapi_backend}/api/${slug}?populate=*`,
+      `http://${backend}/api/${slug}?populate=*`,
       {
         headers: {
-          Authorization: `Bearer ${ctx.session.user.strapi_token}`,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         timeout: 15000,
@@ -242,6 +266,17 @@ const returnPremierOptions = async (ctx, db) => {
     );
   } catch (err) {
     console.error("❌ [returnPremierOptions] Error:", err.message);
+    // Log detailed error diagnostics
+    if (err.response) {
+      console.error("❌ [returnPremierOptions] HTTP Status:", err.response.status);
+      console.error("❌ [returnPremierOptions] Response data:", JSON.stringify(err.response.data || {}).slice(0, 500));
+    } else if (err.code === 'ECONNREFUSED') {
+      console.error("❌ [returnPremierOptions] Connection refused — backend server may be down");
+    } else if (err.code === 'ECONNABORTED') {
+      console.error("❌ [returnPremierOptions] Request timed out — backend may be slow or unreachable");
+    }
+    console.error("❌ [returnPremierOptions] Backend used:", backend || 'N/A');
+    console.error("❌ [returnPremierOptions] Slug attempted:", slug || 'N/A');
     await ctx.reply("A apărut o eroare la preluarea datelor de pe Premier. Verificați link-ul.");
   }
 };
@@ -571,8 +606,29 @@ const linkRouter = async (ctx, userAdId, db) => {
       return returnInfoInChat(adData, ctx, userAdId, db);
 
     } else if (host === "premierimobil.md") {
-      ctx.session.imobilType = ctx.message.text.trim().split("/")[4];
-      return returnPremierOptions(ctx, db);
+      const adData = await scrap_premier(ctx, ctx.message.text.trim());
+      if (!adData) {
+        return ctx.reply("A apărut o eroare la preluarea datelor de pe Premier Imobil. Verificați link-ul.");
+      }
+      // Set imobilType din datele extrase pentru butonul "Post Premier"
+      const typeMap = {
+        "Toate apartamentele": "apartments",
+        "Apartament":          "apartments",
+        "Apartamente":         "apartments",
+        "Case":                "houses",
+        "Casă":                "houses",
+        "houses":              "houses",
+        "Imobiliare comerciale": "commercials",
+        "Comercial":           "commercials",
+        "commercials":         "commercials",
+        "Loturi de teren":     "terrains",
+        "Teren":               "terrains",
+        "terrains":            "terrains",
+      };
+      ctx.session.imobilType = typeMap[adData.type] || adData.type;
+      // Store in session for "Post Premier" button compatibility
+      ctx.session.data = adData;
+      return returnInfoInChat(adData, ctx, userAdId, db);
 
     } else if (host === "immobiliare.md") {
       const adData = await scrap_immobiliare(ctx, ctx.message.text.trim());
