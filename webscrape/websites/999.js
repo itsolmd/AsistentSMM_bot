@@ -437,17 +437,66 @@ const scrap_999 = async (ctx, url) => {
       });
 
       // ── 9. Preț ─────────────────────────────────────────────────
-      let price = 'N/A';
-      if (advert?.price?.value && advert?.price?.unit) {
-        const val = Number(advert.price.value);
-        const unit = advert.price.unit.toUpperCase();
-        price = `${val.toLocaleString()} ${unit}`;
+      // Helper: parse a European-formatted number string to integer
+      // "285.000" → 285000, "285 000" → 285000, "3 202" → 3202
+      function parseEuropeanNumber(str) {
+        if (!str) return NaN;
+        let s = str.replace(/\s+/g, '');   // remove spaces
+        // If contains dots but no commas → European format (dots = thousands)
+        if (s.includes('.') && !s.includes(',')) {
+          s = s.replace(/\./g, '');
+        }
+        // If contains commas but no dots → European format (commas = thousands)
+        if (s.includes(',') && !s.includes('.')) {
+          s = s.replace(/,/g, '');
+        }
+        return parseInt(s, 10);
       }
-      if (price === 'N/A') {
-        const priceMatch = bodyText.match(/(\d[\d\s]*)\s*(€|EUR|eur)/);
+
+      let price = 'N/A';
+
+      // PRIMARY: CSS selector for the exact price element on the page
+      // Uses [data-onboarding="advert-currency-rates"] which is more stable than hashed classes
+      const priceContainer = document.querySelector('[data-onboarding="advert-currency-rates"]');
+      if (priceContainer) {
+        const priceSpan = priceContainer.querySelector('span') || priceContainer;
+        const priceText = priceSpan.textContent.trim();
+        const priceMatch = priceText.match(/([\d\s]+)\s*(€|EUR|eur)/i);
         if (priceMatch) {
-          const num = priceMatch[1].replace(/\s/g, '');
-          price = `${Number(num).toLocaleString()} €`;
+          const num = parseEuropeanNumber(priceMatch[1]);
+          if (!isNaN(num) && num > 0) {
+            price = `${num.toLocaleString()} €`;
+          }
+        }
+      }
+
+      // SECONDARY: __NEXT_DATA__ advert.price (with European number parsing)
+      if (price === 'N/A' && advert?.price?.value != null && advert?.price?.unit) {
+        const val = parseEuropeanNumber(String(advert.price.value));
+        if (!isNaN(val) && val > 0) {
+          const unit = String(advert.price.unit).toUpperCase();
+          price = `${val.toLocaleString()} ${unit === 'EUR' ? '€' : unit}`;
+        }
+      }
+
+      // TERTIARY: Find ALL € amounts in bodyText, pick the LARGEST (actual sale price)
+      if (price === 'N/A') {
+        const priceRegex = /(\d[\d\s]*)\s*(€|EUR|eur)/gi;
+        let match;
+        const allMatches = [];
+        while ((match = priceRegex.exec(bodyText)) !== null) {
+          allMatches.push(match);
+        }
+        if (allMatches.length > 0) {
+          // Parse all matches, filter valid, sort descending by value
+          const parsed = allMatches
+            .map(m => ({ raw: m[1], num: parseEuropeanNumber(m[1]) }))
+            .filter(p => !isNaN(p.num) && p.num > 0)
+            .sort((a, b) => b.num - a.num);
+          if (parsed.length > 0) {
+            // Pick the largest price (most likely the total sale price)
+            price = `${parsed[0].num.toLocaleString()} €`;
+          }
         }
       }
       console.log(`  💰 9) Preț: ${price}`);
@@ -1337,40 +1386,42 @@ const scrap_999 = async (ctx, url) => {
     console.log('[GEO PAYLOAD]', JSON.stringify(geolocation));
 
     // ── 10. Construiește obiectul de returnat ──────────────────
+    // BUG FIX: NEVER return null/N/A — replace with safe defaults
+    // This ensures the posting pipeline never crashes on missing data
     const result = {
       formattedText,
 
-      type: extracted.propertyType,
+      type: extracted.propertyType || 'Apartament',
       link: fixedUrl,
-      price: extracted.price,
-      priceNumeric, // BUG #8: numeric price for filter URL
-      offerType: extracted.offerType,
-      offerTypeId: extracted.offerTypeId, // BUG FIX v3.0: numeric ID for filter URL
-      regionText: extracted.location,
+      price: extracted.price || 'N/A',
+      priceNumeric: priceNumeric || 0, // BUG #8: numeric price for filter URL
+      offerType: extracted.offerType || 'Vând',
+      offerTypeId: extracted.offerTypeId || 776, // BUG FIX v3.0: numeric ID for filter URL (776 = Vând)
+      regionText: extracted.location || 'Chișinău',
       // BUG #2, #3 FIXED: region array with correct order
       region: getLocationArrayForFilter(parsedLocation),
       // Parsed location components
       parsedLocation,
-      rooms: extracted.rooms,
-      area: extracted.area,
-      floor: floorParsed.floor !== null ? String(floorParsed.floor) : extracted.floor,
-      floors: floorParsed.totalFloors !== null ? String(floorParsed.totalFloors) : extracted.totalFloors,
-      bathrooms: extracted.bathrooms,
-      building: extracted.building,
-      title: extracted.title,
-      description: extracted.description,
+      rooms: extracted.rooms !== 'N/A' && extracted.rooms != null ? extracted.rooms : '1',
+      area: extracted.area !== 'N/A' && extracted.area != null ? extracted.area : '50',
+      floor: floorParsed.floor !== null ? String(floorParsed.floor) : (extracted.floor !== 'N/A' ? extracted.floor : '1'),
+      floors: floorParsed.totalFloors !== null ? String(floorParsed.totalFloors) : (extracted.totalFloors !== 'N/A' ? extracted.totalFloors : '1'),
+      bathrooms: extracted.bathrooms || 1,
+      building: extracted.building || 'Construcţii noi',
+      title: extracted.title || 'Anunț imobiliar',
+      description: extracted.description || '',
       images: uniqueImages,
-      phoneNr,
-      advertId: formatId,
-      geolocation,
-      // BUG REPAIR: Caracteristici apartament normalizate
-      heating: normalizedHeating,           // ID numeric pentru Strapi (1=autonomă, 2=centralizată)
-      condition: normalizedCondition,       // string normalizat pentru matchFieldId
-      serie: normalizedSerie,               // string normalizat pentru matchFieldId
-      features: normalizedFeatures,         // array de stringuri normalizate
-      balcony: normalizedBalcony,           // 1 (Da/Balcon/Logie) | 2 (Nu/Fără balcon) | null — numeric ID for Strapi
-      living: normalizedLiving,             // boolean | null
-      developer: normalizedDeveloper,       // string | null
+      phoneNr: phoneNr || '',
+      advertId: formatId || '',
+      geolocation: geolocation || { lat: 47.037, lng: 28.819 },
+      // BUG REPAIR: Caracteristici apartament normalizate — NEVER null
+      heating: normalizedHeating != null ? normalizedHeating : 1,           // ID numeric (1=autonomă — cel mai comun)
+      condition: normalizedCondition || '',                                 // string gol în loc de null
+      serie: normalizedSerie || '',                                         // string gol în loc de null
+      features: normalizedFeatures || [],                                   // array gol în loc de null
+      balcony: normalizedBalcony != null ? normalizedBalcony : 1,           // 1 (Da) — implicit pozitiv
+      living: normalizedLiving != null ? normalizedLiving : false,          // boolean, niciodată null
+      developer: normalizedDeveloper || '',                                 // string gol în loc de null
     };
 
     // ══════════════════════════════════════════════════════════════

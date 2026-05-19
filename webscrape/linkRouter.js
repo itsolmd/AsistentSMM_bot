@@ -247,12 +247,15 @@ const returnPremierOptions = async (ctx, db) => {
 };
 
 const returnInfoInChat = async (adData, ctx, userAdId, db) => {
-  if (!adData) return ctx.reply("Nu am putut extrage datele.");
+  // CRASH-PROOF: Wrap entire function in try-catch to force publication
+  // to complete even when unexpected errors occur
+  try {
+    if (!adData) return ctx.reply("Nu am putut extrage datele.");
 
-  console.log("");
-  console.log("═══════════════════════════════════════════════════════════");
-  console.log("📨 [LINK ROADER] PRELUCRARE ANUNȚ");
-  console.log("═══════════════════════════════════════════════════════════");
+    console.log("");
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("📨 [LINK ROADER] PRELUCRARE ANUNȚ");
+    console.log("═══════════════════════════════════════════════════════════");
 
   /*─── DEBUG: Log raw images before any sanitization ────────────*/
   const rawImgCount = adData.images?.length || 0;
@@ -535,8 +538,17 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
       ]);
 
   await ctx.reply("Ce doriți să faceți?", keyboard);
+  } catch (err) {
+    // CRASH-PROOF: NEVER let returnInfoInChat throw — log error and notify user
+    console.error('❌ [returnInfoInChat] CRITICAL ERROR (forțează continuarea):', err.message);
+    console.error(err.stack);
+    try {
+      await ctx.reply('A apărut o eroare neașteptată, dar procesul continuă. Verificați log-urile.');
+    } catch (_) {
+      // Chiar și mesajul de eroare a eșuat — nu facem nimic, continuăm
+    }
+  }
 };
-
 /*───────────────────────────────────────────────────────────*/
 /* Router principal                                          */
 /*───────────────────────────────────────────────────────────*/

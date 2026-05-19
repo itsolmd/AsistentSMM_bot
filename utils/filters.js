@@ -609,7 +609,7 @@ const getFilter = async (adData, ctx) => {
       region.map(r => r.value).join(',')
      }&o_32_9_${region[0].value}_${region[1].value}=${
       region[2].value
-     }&from_6_2=${Math.max(0, priceNum - 5000)}&to_6_2=${priceNum + 5000}&r_31_2_unit=eur&o_30_241=${getNumberOfRoomsFromString(
+     }&from_6_2=${Math.max(0, Math.round(priceNum * 0.8))}&to_6_2=${Math.max(Math.round(priceNum * 1.2), 100)}&r_31_2_unit=eur&o_30_241=${getNumberOfRoomsFromString(
       adData.rooms
      )}&o_2307_852=${buildingOptionId}&o_1074_253=${conditionOptionId}&from_1073_244=${Math.max(0, areaNum - 5)}&to_1073_244=${areaNum + 5}&r_1073_244_unit=m2&o_1191_248=${
       `${floorNum !== 1 ? getNumberOfFloorsFromString(floorNum - 1) + "," : ""}` +
