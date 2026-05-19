@@ -677,12 +677,15 @@ const extractFeatures = (data, featuresObj, ctx) => {
       }
     }
 
-    // Balcony — BUG FIX: handle numeric IDs from scraper (1=Da, 2=Nu)
+    // Balcony — handle multiple numeric formats from different scrapers:
+    //   Premier scraper: 0=Nu, 1=Da
+    //   999.md scraper:  1=Da, 2=Nu
     if (data.balcony != null) {
       const feature = findFeatureByTitle("Balcon/ lojie");
       if (feature) {
-        // Map numeric ID back to option title for 999.md API
+        // Unified map supporting all scraper formats
         const balconyTitleMap = {
+          0: "Nu",
           1: "Da",
           2: "Nu",
         };
@@ -701,12 +704,17 @@ const extractFeatures = (data, featuresObj, ctx) => {
       }
     }
 
-    // Building
+    // Building — supports both object {ro: "Bloc nou"} and string "Construcţii noi"
     if (data.building) {
       const feature = findFeatureByTitle("Fond locativ");
       if (feature) {
-        const buildingTitle =
-          data.building.ro === "Bloc nou" ? "Construcţii noi" : "Secundar";
+        // Handle both formats: Premier scraper returns string, 999 scraper returns object
+        const buildingRaw = typeof data.building === 'string'
+          ? data.building
+          : (data.building.ro || data.building.title || '');
+        // Detect "new construction" from either "Bloc nou" (object) or "Construcţii noi" (string)
+        const isNew = buildingRaw.toLowerCase().includes("nou") || buildingRaw.toLowerCase().includes("noi");
+        const buildingTitle = isNew ? "Construcţii noi" : "Secundar";
         const optionId = findOptionIdByTitle(feature.options, buildingTitle);
         if (optionId) {
           features.push({ id: feature.id, value: optionId });

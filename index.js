@@ -479,6 +479,8 @@ bot.action(/^select_agent_(.*)$/, checkUser, async (ctx) => {
 
 bot.action(/^select_platform_(.*)$/, checkUser, async (ctx) => {
   const platform = ctx.match[1];
+  // CRASH-PROOF: Initialize if undefined (session expiry or race condition)
+  ctx.session.selectedPlatforms = ctx.session.selectedPlatforms || [];
   ctx.session.selectedPlatforms = ctx.session.selectedPlatforms.includes(
     platform
   )
