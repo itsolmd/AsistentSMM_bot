@@ -1395,7 +1395,9 @@ const scrap_999 = async (ctx, url) => {
       link: fixedUrl,
       price: extracted.price || 'N/A',
       priceNumeric: priceNumeric || 0, // BUG #8: numeric price for filter URL
-      offerType: extracted.offerType || 'Vând',
+      // BUG FIX v3.1: extracted.offerType defaults to 'N/A' (truthy string) so '|| 'Vând'' never fires.
+      // Use explicit ternary to fall back to 'Vând' when value is 'N/A'.
+      offerType: (extracted.offerType && extracted.offerType !== 'N/A') ? extracted.offerType : 'Vând',
       offerTypeId: extracted.offerTypeId || 776, // BUG FIX v3.0: numeric ID for filter URL (776 = Vând)
       regionText: extracted.location || 'Chișinău',
       // BUG #2, #3 FIXED: region array with correct order

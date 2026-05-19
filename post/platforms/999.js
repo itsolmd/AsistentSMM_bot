@@ -487,15 +487,13 @@ const extractFeaturesId = async (ctx, type) => {
   } else if (type === "terrains") {
     typeID = 1407;
   } else {
-    throw new Error(
-      `Tip imobil necunoscut: "${type}". Valori acceptate: apartments, houses, commercials, terrains.`
-    );
+    console.error(`[extractFeaturesId] ❌ Tip imobil necunoscut: "${type}". Se folosește apartamente ca fallback.`);
+    typeID = 1404; // fallback la apartamente — NU întrerupe procesul
   }
   // SAFETY GUARD: typeID must be a valid number before making API call
   if (typeof typeID !== 'number' || isNaN(typeID)) {
-    throw new Error(
-      `Invalid typeID: "${typeID}" for type: "${type}". Cannot query 999.md features API.`
-    );
+    console.error(`[extractFeaturesId] ❌ Invalid typeID: "${typeID}" for type: "${type}". Using default 1404.`);
+    typeID = 1404; // fallback — NU întrerupe procesul
   }
   // Use the resolved category_id dynamically instead of hardcoded "270"
   const categoryId = resolveCategoryId(ctx);
@@ -1735,47 +1733,54 @@ const postTo999 = async (ctx) => {
 
   if (categoryId === "270") {
     // ── Imobiliare — use existing description logic ──
+    const sessionData = ctx.session.data || {};
     if (ctx.session.imobilType === "apartments") {
       subcategory = "1404";
+      // Use human-readable location names instead of numeric IDs from location array
+      const cityName = sessionData.parsedLocation?.city || sessionData.region?.[1] || location[1]?.value || '';
+      const sectorName = sessionData.parsedLocation?.sector || sessionData.region?.[2] || location[2]?.value || '';
       desc = `În vânzare apartament${
-        ctx.session.data.apartament_sery
-          ? `, seria ${ctx.session.data.apartament_sery.serie}`
+        sessionData.apartament_sery
+          ? `, seria ${sessionData.apartament_sery.serie}`
           : ""
-      }, amplasat în ${location[1].value}, ${location[2].value}.
+      }, amplasat în ${cityName}, ${sectorName}.
           Locuința se desfășoară pe o suprafață de ${
-            ctx.session.data.area
-          } m², localizat la etajul ${ctx.session.data.floor} din ${
-        ctx.session.data.floors
+            sessionData.area
+          } m², localizat la etajul ${sessionData.floor} din ${
+        sessionData.floors
       }, fiind compartimentată în: ${
-        ctx.session.data.rooms === 1
+        sessionData.rooms == 1
           ? "1 cameră"
-          : `${ctx.session.data.rooms} camere`
+          : `${sessionData.rooms} camere`
       }, bucătărie,
            ${
-             ctx.session.data.bathrooms === 1
+             sessionData.bathrooms == 1
                ? "1 bloc sanitar"
-               : `${ctx.session.data.bathrooms} blocuri sanitare`
+               : `${sessionData.bathrooms} blocuri sanitare`
            } și antreu.`;
     } else if (ctx.session.imobilType === "houses") {
       subcategory = "1406";
+      // Use human-readable location names instead of numeric IDs from location array
+      const cityName = sessionData.parsedLocation?.city || sessionData.region?.[1] || location[1]?.value || '';
+      const sectorName = sessionData.parsedLocation?.sector || sessionData.region?.[2] || location[2]?.value || '';
       desc = `În vânzare casă${
-        ctx.session.data.house_type
-          ? `, tip ${ctx.session.data.house_type}`
+        sessionData.house_type
+          ? `, tip ${sessionData.house_type}`
           : ""
-      }, amplasată în ${location[1].value}, ${location[2].value}.
+      }, amplasată în ${cityName}, ${sectorName}.
           Locuința se desfășoară pe o suprafață de ${
-            ctx.session.data.area
+            sessionData.area
           } m², dispune de ${
-        ctx.session.data.floors
+        sessionData.floors
       } etaje, fiind compartimentată în: ${
-        ctx.session.data.rooms === 1
+        sessionData.rooms == 1
           ? "1 cameră"
-          : `${ctx.session.data.rooms} camere`
+          : `${sessionData.rooms} camere`
       }, bucătărie,
            ${
-             ctx.session.data.bathrooms === 1
+             sessionData.bathrooms == 1
                ? "1 grup sanitar"
-               : `${ctx.session.data.bathrooms} grupuri sanitare`
+               : `${sessionData.bathrooms} grupuri sanitare`
            }.`;
     } else if (ctx.session.imobilType === "commercials") {
       subcategory = "1405";
@@ -1816,13 +1821,45 @@ const postTo999 = async (ctx) => {
   // ═══════════════════════════════════════════════════════════════════
   // TITLE (feature id: 12) — REQUIRED per API docs
   // ═══════════════════════════════════════════════════════════════════
-  // API supports two formats (see Q&A section in API docs):
-  //   1. Multilingual object: { "ro": "Titlu RO", "ru": "RU заголовок" }
-  //   2. Simple string: "Titlu RO"
+  // ⚠️ REGULĂ STRICTĂ: Pentru categoria Imobiliare (270), titlul trebuie
+  // să aibă MAXIM 5-7 cuvinte. Fără preț, suprafață, camere, locație.
+  //
+  // FORMATUL CORECT:
+  //   - "În vânzare apartament"
+  //   - "Vând apartament"
+  //   - "Apartament de vânzare"
+  //   - "În vânzare casă"
+  //   - "Casă de vânzare"
+  //
+  // CE NU TREBUIE SĂ FIE:
+  //   - Fără preț
+  //   - Fără suprafață
+  //   - Fără număr camere
+  //   - Fără cartier/sector
+  //   - Fără număr de telefon
   // ═══════════════════════════════════════════════════════════════════
+  const SHORT_TITLE_MAP = {
+    'apartments': ['În vânzare apartament', 'Vând apartament', 'Apartament de vânzare'],
+    'houses':     ['În vânzare casă', 'Vând casă', 'Casă de vânzare'],
+    'commercials': ['În vânzare spațiu comercial', 'Vând spațiu comercial', 'Spațiu comercial de vânzare'],
+    'terrains':   ['În vânzare teren', 'Vând teren', 'Teren de vânzare'],
+  };
+
   let titleValue;
-  const hasBilingualTitle = ctx.session.data.title_ro && ctx.session.data.title_ru;
-  if (hasBilingualTitle) {
+  const safeType = safeImobilType || inferImobilType(ctx);
+  const shortTitles = SHORT_TITLE_MAP[safeType] || SHORT_TITLE_MAP.apartments;
+
+  // Rotate through short title variants based on first letter of content hash
+  // to avoid identical titles for every post
+  const contentStr = JSON.stringify(ctx.session.data || {});
+  const titleIndex = contentStr.length % shortTitles.length;
+  const enforcedShortTitle = shortTitles[titleIndex];
+
+  if (categoryId === "270") {
+    // Imobiliare — FORCE short title (max 5-7 cuvinte)
+    titleValue = enforcedShortTitle;
+    console.log(`[postTo999] 🏷️ Titlu scurt forțat (imobiliare): "${titleValue}"`);
+  } else if (ctx.session.data.title_ro && ctx.session.data.title_ru) {
     titleValue = {
       ro: ctx.session.data.title_ro,
       ru: ctx.session.data.title_ru,
@@ -1830,11 +1867,7 @@ const postTo999 = async (ctx) => {
   } else if (ctx.session.data.title) {
     titleValue = ctx.session.data.title;
   } else {
-    titleValue = `${
-      ctx.session.imobilType === "apartments" ? "Apartament" :
-      ctx.session.imobilType === "houses" ? "Casă" :
-      ctx.session.imobilType === "commercials" ? "Spațiu comercial" : "Teren"
-    } in vanzare`;
+    titleValue = enforcedShortTitle;
   }
 
   // ═══════════════════════════════════════════════════════════════════

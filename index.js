@@ -33,33 +33,23 @@ const bot = new Telegraf(process.env.BOT_ID);
 let healthServer = null;
 
 /* ════════════════════════════════════════════════════════════════
-   GLOBAL CRASH PROTECTION  (Nivelul 2)
-   FORCE restart on uncaughtException / unhandledRejection
+   GLOBAL ERROR HANDLERS  (RESILIENT — NO CRASH)
+   NEVER exit the process — just log and continue
    ════════════════════════════════════════════════════════════════ */
 process.on("unhandledRejection", (reason, promise) => {
-  logger.fatal("GENERAL", "❌ GLOBAL: Unhandled Rejection", {
+  logger.error("GENERAL", "❌ GLOBAL: Unhandled Rejection (process continues)", {
     reason: reason?.message || reason,
     stack: reason?.stack,
   });
-  logger.restart("Forced restart due to unhandled rejection");
-
-  // Allow 2s for logs to flush, then die hard (PM2 will restart)
-  setTimeout(() => {
-    process.exit(1);
-  }, 2000);
+  // ❌ NU face process.exit() — procesul continuă
 });
 
 process.on("uncaughtException", (error) => {
-  logger.fatal("GENERAL", "❌ GLOBAL: Uncaught Exception", {
+  logger.error("GENERAL", "❌ GLOBAL: Uncaught Exception (process continues)", {
     error: error.message,
     stack: error.stack,
   });
-  logger.restart("Forced restart due to uncaught exception");
-
-  // Allow 2s for logs to flush, then die hard (PM2 will restart)
-  setTimeout(() => {
-    process.exit(1);
-  }, 2000);
+  // ❌ NU face process.exit() — procesul continuă
 });
 
 /* ════════════════════════════════════════════════════════════════

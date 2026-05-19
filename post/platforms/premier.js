@@ -625,7 +625,9 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
         infos: await (async () => {
           let filterUrl = "";
           try {
-            filterUrl = await getFilter(data, ctx);
+            const result = await getFilter(data, ctx);
+            // getFilter now returns { filterUrl, structuredFilter }
+            filterUrl = result?.filterUrl || "";
           } catch (filterErr) {
             console.error("❌ [postToPremier] getFilter failed:", filterErr.message);
             filterUrl = ""; // Graceful fallback — never crash on filter
@@ -742,7 +744,9 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
         infos: await (async () => {
           let filterUrl = "";
           try {
-            filterUrl = await getFilter(data, ctx);
+            const result = await getFilter(data, ctx);
+            // getFilter now returns { filterUrl, structuredFilter }
+            filterUrl = result?.filterUrl || "";
           } catch (filterErr) {
             console.error("❌ [postToPremier] getFilter failed for Imobiliare comerciale:", filterErr.message);
             filterUrl = "";

@@ -1,15 +1,163 @@
-
-
-
-
-
-
 const { default: axios } = require("axios");
 const {
   parsePriceToNumber,
   safeNumber,
   cleanEscapedText,
 } = require('./cleaners');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REGULA 5 - STRUCTURA OBLIGATORIE FILTRU IMOBILIAR
+// ═══════════════════════════════════════════════════════════════════════════════
+// Definiește schema standard pentru un filtru de căutare imobiliară.
+// Toate funcțiile de validare și generare filtru trebuie să respecte această structură.
+//
+// Câmpuri obligatorii:
+//   tip_oferta  – unul din cele 6 tipuri de ofertă
+//   pret.min    – preț minim (sau null)
+//   pret.max    – preț maxim (sau null)
+//   pret.interval_delta – marja implicită de ±5000
+// ═══════════════════════════════════════════════════════════════════════════════
+const FILTER_STRUCTURE = {
+  tip_oferta: ["Vând", "Cumpăr", "De închiriat pe zi", "De închiriat lunar", "Închiriez", "Schimb"],
+  pret: {
+    min: "number | null",
+    max: "number | null",
+    interval_delta: 5000,
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REGULA 2 - TIP OFERTĂ (OBLIGATORIU)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Mapare denumire afișată → ID 999.md API pentru filtrul URL.
+// NOTĂ: "De închiriat pe zi" și "De închiriat lunar" se mapează la același ID 779
+// (tipul general "Închiriez" în 999.md), iar diferențierea pe durată se face
+// prin alte feature-uri (preț/zi vs. preț/lună).
+// ═══════════════════════════════════════════════════════════════════════════════
+const OFFER_TYPES = [
+  { id: 776, label: "Vând" },
+  { id: 777, label: "Cumpăr" },
+  { id: 780, label: "De închiriat pe zi" },   // mapped to 999.md rental (daily variant)
+  { id: 781, label: "De închiriat lunar" },     // mapped to 999.md rental (monthly variant)
+  { id: 779, label: "Închiriez" },
+  { id: 778, label: "Schimb" },
+];
+
+// Quick lookup: label → ID
+const OFFER_TYPE_MAP = Object.fromEntries(
+  OFFER_TYPES.map((ot) => [ot.label.toLowerCase(), ot.id])
+);
+
+// Quick lookup: ID → label
+const OFFER_TYPE_ID_TO_LABEL = Object.fromEntries(
+  OFFER_TYPES.map((ot) => [ot.id, ot.label])
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REGULA 3 & 4 - VALIDARE FILTRU
+// ═══════════════════════════════════════════════════════════════════════════════
+// validateFilter() verifică dacă datele conțin câmpurile obligatorii.
+// Returnează:
+//   { valid: true, structuredFilter: {...} }   – dacă totul este complet
+//   { valid: false, message: "..." }           – dacă lipsește ceva (REGULA 4)
+// ═══════════════════════════════════════════════════════════════════════════════
+function validateFilter(input) {
+  const errors = [];
+
+  // ── Verifică tip ofertă ──────────────────────────────────────────
+  // BUG FIX v3.1: If offerType label is "N/A" but offerTypeId is valid,
+  // resolve the label from OFFER_TYPE_ID_TO_LABEL map.
+  let offerTypeLabel = input?.offerType || input?.tip_oferta || null;
+  if ((!offerTypeLabel || offerTypeLabel === "N/A") && input?.offerTypeId != null) {
+    const resolvedLabel = OFFER_TYPE_ID_TO_LABEL[input.offerTypeId];
+    if (resolvedLabel) {
+      offerTypeLabel = resolvedLabel;
+      console.log(`🔍 [validateFilter] Resolved offerType from ID ${input.offerTypeId} → "${resolvedLabel}"`);
+    }
+  }
+
+  if (!offerTypeLabel || offerTypeLabel === "N/A") {
+    errors.push({
+      field: "tip_oferta",
+      message: `Ce tip de ofertă dorești? Alege: ${FILTER_STRUCTURE.tip_oferta.join(" / ")}`,
+    });
+  } else {
+    const normalized = offerTypeLabel.toLowerCase().trim();
+    const isValid = OFFER_TYPES.some(
+      (ot) => ot.label.toLowerCase() === normalized
+    );
+    if (!isValid) {
+      errors.push({
+        field: "tip_oferta",
+        message: `Tipul de ofertă "${offerTypeLabel}" nu este recunoscut. Alege: ${FILTER_STRUCTURE.tip_oferta.join(" / ")}`,
+      });
+    }
+  }
+
+  // ── Verifică preț ─────────────────────────────────────────────────
+  const priceNum =
+    input?.priceNumeric != null
+      ? safeNumber(input.priceNumeric)
+      : input?.price
+        ? parsePriceToNumber(input.price)
+        : null;
+
+  // Prețul nu este obligatoriu (poate fi căutare fără interval),
+  // dar dacă există, trebuie să fie un număr valid.
+  if (priceNum != null && (isNaN(priceNum) || priceNum < 0)) {
+    errors.push({
+      field: "pret",
+      message: `Prețul specificat ("${input.price || input.priceNumeric}") nu este un număr valid.`,
+    });
+  }
+
+  // ── Rezultat validare ─────────────────────────────────────────────
+  if (errors.length > 0) {
+    // REGULA 4: Format răspuns când lipsește ceva
+    let response = "Corect. La formarea filtrului trebuie adăugat:\n";
+
+    for (const err of errors) {
+      if (err.field === "tip_oferta") {
+        response += `1. Tip ofertă: (selectează una din: ${FILTER_STRUCTURE.tip_oferta.join(", ")})\n`;
+      } else if (err.field === "pret") {
+        const pNum =
+          input?.priceNumeric != null
+            ? safeNumber(input.priceNumeric)
+            : input?.price
+              ? parsePriceToNumber(input.price)
+              : null;
+        const fromPrice = pNum != null ? Math.max(0, pNum - 5000) : "?";
+        const toPrice = pNum != null ? pNum + 5000 : "?";
+        response += `2. Interval preț: ${fromPrice} - ${toPrice} (cu opțiunea de ±5000)\n`;
+      } else {
+        response += `- ${err.field}: ${err.message}\n`;
+      }
+    }
+
+    return {
+      valid: false,
+      message: response.trim(),
+      errors,
+    };
+  }
+
+  // ── Construiește obiectul structurat (REGULA 5) ────────────────────
+  const structuredFilter = {
+    tip_oferta: offerTypeLabel,
+    pret: {
+      min: priceNum != null ? Math.max(0, priceNum - 5000) : null,
+      max: priceNum != null ? priceNum + 5000 : null,
+      interval_delta: 5000,
+    },
+  };
+
+  return {
+    valid: true,
+    structuredFilter,
+    priceNum,
+    offerTypeLabel,
+  };
+}
 
 function extractStreet(address) {
   const match = address.match(/((?:str\.|ул\.|strada)\s[^,]*?)(?=\s\d+|$)/i);
@@ -494,6 +642,22 @@ const getFilter = async (adData, ctx) => {
     console.log("🔍 [getFilter] Input adData:", JSON.stringify(adData, null, 2));
     console.log("🔍 [getFilter] adData.region:", adData.region);
 
+    // ═══════════════════════════════════════════════════════════════════
+    // REGULA 3 - VALIDARE: Verifică dacă tipul ofertei este prezent
+    // ═══════════════════════════════════════════════════════════════════
+    const validation = validateFilter(adData);
+    if (!validation.valid) {
+      console.warn("⚠️ [getFilter] Validation failed:", validation.message);
+      // Return structured validation message instead of empty URL
+      return JSON.stringify({
+        error: "VALIDATION_FAILED",
+        message: validation.message,
+        structuredFilter: FILTER_STRUCTURE,
+      });
+    }
+
+    const { structuredFilter, priceNum, offerTypeLabel } = validation;
+
     if (!adData || !adData.region) {
       console.error("❌ [getFilter] adData or adData.region is missing:", adData);
       adData = adData || {};
@@ -526,10 +690,12 @@ const getFilter = async (adData, ctx) => {
 
     // ── SAFE PRICE (BUG #8 FIXED) ───────────────────────────────
     // Use priceNumeric if available (from new scraper), otherwise parse the price string
-    const priceNum = adData.priceNumeric != null
-      ? safeNumber(adData.priceNumeric)
-      : parsePriceToNumber(adData.price);
-    console.log("🔍 [getFilter] Parsed price:", adData.price, "→ numeric:", priceNum);
+    const effectivePriceNum = priceNum != null
+      ? priceNum
+      : adData.priceNumeric != null
+        ? safeNumber(adData.priceNumeric)
+        : parsePriceToNumber(adData.price);
+    console.log("🔍 [getFilter] Parsed price:", adData.price, "→ numeric:", effectivePriceNum);
 
     // ── SAFE FLOOR (BUG #6 FIXED) ───────────────────────────────
     // Convert floor to NUMBER to prevent string concatenation (floor + 1 → "61")
@@ -545,9 +711,10 @@ const getFilter = async (adData, ctx) => {
     // ══════════════════════════════════════════════════════════════
 
     // ── OFFER TYPE (feature 33) ──────────────────────────────────
-    // 776 = Vând, 779 = Închiriez, 777 = Cumpăr, 778 = Schimb
-    const offerTypeId = adData.offerTypeId || 776;
-    console.log("🔍 [getFilter] Offer type ID:", offerTypeId);
+    // Determină ID-ul ofertei din label (REGULA 2)
+    const offerTypeLabelLower = offerTypeLabel.toLowerCase().trim();
+    const offerTypeId = OFFER_TYPE_MAP[offerTypeLabelLower] || 776;
+    console.log("🔍 [getFilter] Offer type label:", offerTypeLabel, "→ ID:", offerTypeId);
 
     // ── HEATING (feature 2203) ───────────────────────────────────
     // Map Strapi heating ID (1=Autonomă, 2=Centralizată) to 999.md filter option ID
@@ -604,18 +771,40 @@ const getFilter = async (adData, ctx) => {
     const conditionOptionId = isWhiteVariant ? "925" : "916";
     console.log("🔍 [getFilter] Condition:", conditionStr, "→ isWhiteVariant:", isWhiteVariant, "→ option:", conditionOptionId);
 
+    // ══════════════════════════════════════════════════════════════
+    // REGULA 1 - INTERVAL PREȚ: ±5000 față de valoarea căutată
+    // ══════════════════════════════════════════════════════════════
+    // Intervalul implicit sugerat: [valoarea_cautată - 5000] până la [valoarea_cautată + 5000]
+    // Dacă prețul nu este disponibil, se omite filtrul de preț.
+    const PRICE_OFFSET = 5000;
+    let fromPrice, toPrice;
+
+    if (effectivePriceNum != null && !isNaN(effectivePriceNum) && effectivePriceNum > 0) {
+      fromPrice = Math.max(0, effectivePriceNum - PRICE_OFFSET);
+      toPrice = effectivePriceNum + PRICE_OFFSET;
+      console.log("🔍 [getFilter] Price range (±5000):", fromPrice, "—", toPrice, "(base:", effectivePriceNum, ")");
+    } else {
+      fromPrice = 0;
+      toPrice = 0;
+      console.log("🔍 [getFilter] No valid price — price filter omitted");
+    }
+
     // ── BUILD FILTER URL ─────────────────────────────────────────
-    let init = `https://999.md/ro/list/real-estate/apartments-and-rooms?hide_duplicates=no&applied=1&show_all_checked_childrens=no&ef=33,32,31,30,2307,1073,2203,1074,1191,1192&o_33_1=${offerTypeId}&eo=${
+    // Format exact conform cerințelor: ofertă → locație → preț → camere → etaj → suprafață → stare → bloc
+    let init = `https://999.md/ro/list/real-estate/apartments-and-rooms?hide_duplicates=no&applied=1&show_all_checked_childrens=no&ef=33,32,31,30,2307,1073,2203,1074,1191,1192&o_16_1=${offerTypeId}&eo=${
       region.map(r => r.value).join(',')
-     }&o_32_9_${region[0].value}_${region[1].value}=${
-      region[2].value
-     }&from_6_2=${Math.max(0, Math.round(priceNum * 0.8))}&to_6_2=${Math.max(Math.round(priceNum * 1.2), 100)}&r_31_2_unit=eur&o_30_241=${getNumberOfRoomsFromString(
+     }&r_31_2_unit=eur&r_1073_244_unit=m2&o_30_241=${getNumberOfRoomsFromString(
       adData.rooms
-     )}&o_2307_852=${buildingOptionId}&o_1074_253=${conditionOptionId}&from_1073_244=${Math.max(0, areaNum - 5)}&to_1073_244=${areaNum + 5}&r_1073_244_unit=m2&o_1191_248=${
+     )}&o_32_9=${region[2].value}&from_1073_244=${Math.max(0, areaNum - 5)}&to_1073_244=${areaNum + 5}&unit_1073_244=meter_square&o_1074_253=${conditionOptionId}&o_1191_248=${
       `${floorNum !== 1 ? getNumberOfFloorsFromString(floorNum - 1) + "," : ""}` +
       getNumberOfFloorsFromString(floorNum) +
       `${floorNum !== 25 ? "," + getNumberOfFloorsFromString(floorNum + 1) : ""}`
-     }`;
+     }&o_2307_852=${buildingOptionId}`;
+
+    // Adaugă intervalul de preț doar dacă avem o valoare validă
+    if (fromPrice > 0 || toPrice > 0) {
+      init += `&from_9441_2=${fromPrice}&to_9441_2=${toPrice}&unit_9441_2=eur`;
+    }
 
     // Append heating filter if option ID is known
     if (heatingOptionId && !heatingOptionId.startsWith('TODO_')) {
@@ -631,22 +820,47 @@ const getFilter = async (adData, ctx) => {
     // DEBUG LOG: Final filter URL (BUG FIX v3.0)
     // ══════════════════════════════════════════════════════════════
     console.log("[DEBUG v3.0] === FILTER URL DEBUG ===");
-    console.log("[DEBUG v3.0] Offer type ID:", offerTypeId);
+    console.log("[DEBUG v3.0] Offer type ID:", offerTypeId, "(from label:", offerTypeLabel, ")");
     console.log("[DEBUG v3.0] Heating ID:", adData.heating, "→ filter option:", heatingOptionId);
     console.log("[DEBUG v3.0] Balcony ID:", adData.balcony, "→ filter option:", balconyOptionId);
     console.log("[DEBUG v3.0] Building option:", buildingOptionId);
     console.log("[DEBUG v3.0] Condition option:", conditionOptionId);
+    console.log("[DEBUG v3.0] Price range:", fromPrice, "—", toPrice);
     console.log("[DEBUG v3.0] Final filter URL:", init);
     console.log("[DEBUG v3.0] =======================");
 
-    return init;
+    // ══════════════════════════════════════════════════════════════
+    // REGULA 5 - Returnează și obiectul structurat al filtrului
+    // ══════════════════════════════════════════════════════════════
+    const result = {
+      filterUrl: init,
+      structuredFilter: {
+        tip_oferta: offerTypeLabel,
+        pret: {
+          min: fromPrice > 0 ? fromPrice : null,
+          max: toPrice > 0 ? toPrice : null,
+          interval_delta: PRICE_OFFSET,
+        },
+      },
+    };
+
+    return result;
   } catch (error) {
     console.error("❌ [getFilter] Error generating filter URL:", error.message);
     console.error(error.stack);
-    return ""; // Return empty string instead of undefined to prevent further crashes
+    return {
+      filterUrl: "",
+      error: error.message,
+      structuredFilter: FILTER_STRUCTURE,
+    };
   }
 };
 
 module.exports = {
   getFilter,
+  validateFilter,
+  FILTER_STRUCTURE,
+  OFFER_TYPES,
+  OFFER_TYPE_MAP,
+  OFFER_TYPE_ID_TO_LABEL,
 };

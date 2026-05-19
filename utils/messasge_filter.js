@@ -2,7 +2,9 @@ const { getFilter } = require("./filters");
 
 const sendFilter = async (ctx, data) => {
   try {
-    const filterUrl = await getFilter(data, ctx);
+    const result = await getFilter(data, ctx);
+    // getFilter now returns { filterUrl, structuredFilter }
+    const filterUrl = result?.filterUrl || "";
     if (!filterUrl) {
       console.warn("⚠️ [sendFilter] Filter URL is empty, returning fallback");
       return `Link : ${ctx.message.text.trim()}

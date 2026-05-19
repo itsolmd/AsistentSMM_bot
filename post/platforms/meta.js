@@ -1,5 +1,15 @@
 const axios = require("axios");
 const { getCollection } = require("../../db");
+const {
+  generateContentHash,
+  checkDuplicatePost,
+  savePostedRecord,
+  cleanupDuplicatePosts,
+} = require("../../services/deduplicator");
+const { askAIWhatToDo } = require("../../services/errorResolver");
+
+// ── Sleep helper ───────────────────────────────────────────────
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Extract a human-readable location string from session data,
@@ -46,9 +56,7 @@ function getMetaPropertyType(ctx) {
 }
 
 /**
- * Extract apartment series string from session data,
- * supporting both Premier format ({serie: "..."}) and
- * 999.md scraper format (plain string in .serie or .apartament_sery).
+ * Extract apartment series string from session data.
  */
 function getMetaSerie(ctx) {
   const raw = ctx.session.data?.apartament_sery;
@@ -91,8 +99,6 @@ function buildMetaDescription(ctx, phoneFromDb = '') {
 
   /**
    * Normalize building type to simple "nou" or "secundar".
-   * "Construcţii noi", "Bloc nou", "nou" → "nou"
-   * "secundar", "vechi", "existent" → "secundar"
    */
   const normalizeBuilding = (building) => {
     if (!building) return null;
@@ -105,7 +111,7 @@ function buildMetaDescription(ctx, phoneFromDb = '') {
   // Title line
   lines.push(`În vânzare ${titleType}...`);
 
-  // Location with full address (no "Locație:" label)
+  // Location with full address
   const locationParts = [locationText];
   if (addressLine) locationParts.push(addressLine);
   lines.push(`📍 ${locationParts.join(', ')}`);
@@ -113,7 +119,7 @@ function buildMetaDescription(ctx, phoneFromDb = '') {
   // Price
   lines.push(`💰 Preț: ${price}`);
 
-  // Property-specific details (no Serie, no Băi, no contact, no ID on Facebook)
+  // Property-specific details
   if (imobilType === "apartments") {
     lines.push(`🛏️ Dormitoare: ${data.rooms || 'N/A'}`);
     lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
@@ -134,8 +140,7 @@ function buildMetaDescription(ctx, phoneFromDb = '') {
     lines.push(`📐 Suprafață: ${data.area || 'N/A'} m²`);
   }
 
-  // ── Contact phone ────────────────────────────────────────────
-  // Priority: 1) direct MongoDB query (phoneFromDb), 2) session user, 3) scraped ad data
+  // ── Contact phone ──
   const phone = phoneFromDb || ctx.session.user?.phoneNr || ctx.session.data?.phoneNr || '';
   const userName = ctx.session.user?.name || '';
   const firstName = userName ? userName.split(' ')[0] : '';
@@ -144,11 +149,7 @@ function buildMetaDescription(ctx, phoneFromDb = '') {
     lines.push(`📞 ${phoneDisplay} (WhatsApp/Viber) - ${firstName}`);
   }
 
-  // ── DB ID from advertisement (e.g. 🆔DB_Ap101739166) ──────
-  // Priority:
-  //   1. advertId (set by 999.md scraper as "DB_Ap...")
-  //   2. data.id (Strapi/Premier document ID)
-  //   3. data._id (raw MongoDB ObjectId)
+  // ── DB ID from advertisement ──
   let advertId = ctx.session.data?.advertId;
   if (!advertId && ctx.session.data?.id) {
     advertId = `DB_Ap${ctx.session.data.id}`;
@@ -163,8 +164,162 @@ function buildMetaDescription(ctx, phoneFromDb = '') {
   return lines.join('\n');
 }
 
-async function postToMeta(ctx, mediaGroupProcessed = true) {
-  // ── Fetch phone number directly from MongoDB ─────────────────
+/**
+ * refreshFacebookToken(ctx)
+ *
+ * Attempts to re-authenticate the Facebook token.
+ * Strategy:
+ *   1. Try env fallback FB_ACCES_TOKEN
+ *   2. If that fails, inform user to re-authenticate
+ *
+ * @param {Object} ctx - Telegram session context
+ * @returns {Promise<boolean>} - true if token was refreshed
+ */
+async function refreshFacebookToken(ctx) {
+  // Try 1: Environment fallback token
+  if (process.env.FB_ACCES_TOKEN) {
+    console.log('[refreshFacebookToken] 🔄 Trying env FB_ACCES_TOKEN fallback...');
+    ctx.session.user.fb_acces_token = process.env.FB_ACCES_TOKEN;
+
+    // Verify the fallback token works
+    try {
+      const graph = `https://graph.facebook.com/v21.0`;
+      const verifyResp = await axios.get(`${graph}/me/accounts`, {
+        headers: { Authorization: `Bearer ${process.env.FB_ACCES_TOKEN}` },
+        timeout: 10000,
+      });
+      if (verifyResp.data?.data) {
+        console.log('[refreshFacebookToken] ✅ Env fallback token verified successfully');
+        return true;
+      }
+    } catch (verifyErr) {
+      console.warn('[refreshFacebookToken] ❌ Env fallback token also invalid:', verifyErr.response?.data?.error?.message || verifyErr.message);
+    }
+  }
+
+  // Try 2: Ask user to re-authenticate (we can't do this automatically)
+  // But we DON'T interrupt the process — just log and return false
+  console.log('[refreshFacebookToken] ❌ Cannot refresh token automatically. User needs to re-authenticate via Facebook.');
+  return false;
+}
+
+/**
+ * postWithIntelligentRetry(postFn, ctx, contentData, platform, maxRetries)
+ *
+ * Generic intelligent retry wrapper for posting to any platform.
+ * Handles:
+ *   - Token expiration (error 190) → auto-refresh
+ *   - Rate limiting → progressive waits
+ *   - Other errors → exponential backoff
+ *   - After maxRetries → AI fallback for decision
+ *   - NEVER throws — always returns { success, result } or { success: false, error, skipped }
+ *
+ * @param {Function} postFn - Async function that performs the actual post
+ * @param {Object} ctx - Telegram session context
+ * @param {Object} contentData - Data being posted
+ * @param {string} platform - Platform name
+ * @param {number} maxRetries - Maximum retry attempts (default: 10)
+ * @returns {Promise<Object>} - Result object
+ */
+async function postWithIntelligentRetry(postFn, ctx, contentData, platform, maxRetries = 10) {
+  let attempt = 0;
+  let lastError = null;
+
+  while (attempt < maxRetries) {
+    attempt++;
+    console.log(`[${platform}] 🔄 Attempt ${attempt}/${maxRetries}...`);
+
+    try {
+      const result = await postFn(ctx, contentData);
+      console.log(`[${platform}] ✅ Posted successfully on attempt ${attempt}`);
+      return { success: true, result };
+    } catch (error) {
+      lastError = error;
+      const fbError = error.response?.data?.error;
+      const errorCode = fbError?.code || error.code || error.response?.status;
+      const errorMsg = fbError?.message || error.message || String(error);
+
+      console.error(`[${platform}] ❌ Attempt ${attempt} failed:`, errorMsg.slice(0, 200));
+
+      // ── Token expired (error 190) → refresh and retry immediately ──
+      if (errorCode === 190 || errorMsg.includes("token") || errorMsg.includes("access token")) {
+        console.log(`[${platform}] 🔄 Token issue detected — attempting refresh...`);
+        const refreshed = await refreshFacebookToken(ctx);
+        if (refreshed) {
+          continue; // reîncearcă imediat cu token nou, NU aștepta
+        }
+        // Token refresh failed — try fallback then skip
+        console.log(`[${platform}] ⚠️ Token refresh failed — trying fallback...`);
+        continue;
+      }
+
+      // ── Rate limit → wait progressively ──
+      if (errorMsg.includes("rate limit") || errorCode === 429) {
+        const waitMs = attempt * 10000; // 10s, 20s, 30s...
+        console.log(`[${platform}] ⏳ Rate limit — waiting ${waitMs / 1000}s...`);
+        await sleep(waitMs);
+        continue;
+      }
+
+      // ── Other errors → exponential backoff ──
+      const waitTime = Math.min(1000 * Math.pow(2, attempt), 60000);
+      console.log(`[${platform}] ⏳ Waiting ${waitTime / 1000}s before retry...`);
+      await sleep(waitTime);
+    }
+  }
+
+  // ── After maxRetries, ask AI what to do ──
+  console.log(`[${platform}] 🤖 All ${maxRetries} attempts failed — consulting AI...`);
+  try {
+    const aiDecision = await askAIWhatToDo(
+      lastError,
+      { platform, contentPreview: JSON.stringify(contentData).slice(0, 300) },
+      platform
+    );
+
+    console.log(`[${platform}] 🤖 AI decision: ${aiDecision.action} — ${aiDecision.suggestion}`);
+
+    if (aiDecision.action === "retry" || aiDecision.action === "retry_with_new_token") {
+      // If AI says retry with new token, refresh and retry (up to 5 more times)
+      if (aiDecision.action === "retry_with_new_token") {
+        await refreshFacebookToken(ctx);
+      }
+      // Retry with lower max (AI-specified count)
+      return postWithIntelligentRetry(postFn, ctx, contentData, platform, aiDecision.retry_count || 5);
+    }
+
+    // For skip/wait/escalate, return the error with AI suggestion
+    return {
+      success: false,
+      error: lastError,
+      skipped: true,
+      aiSuggestion: aiDecision.suggestion,
+      action: aiDecision.action,
+    };
+  } catch (aiErr) {
+    // Even AI failed — log and skip
+    console.error(`[${platform}] ❌ AI consultation also failed:`, aiErr.message);
+    return {
+      success: false,
+      error: lastError,
+      skipped: true,
+      aiSuggestion: "AI could not be consulted. Skipping to next post.",
+    };
+  }
+}
+
+/**
+ * performMetaPost(ctx, contentData)
+ *
+ * The actual posting logic (extracted so it can be retried).
+ * Called by postWithIntelligentRetry.
+ *
+ * @param {Object} ctx - Telegram session context
+ * @param {Object} contentData - Unused (data comes from ctx.session)
+ * @returns {Promise<Object>} - { fb, inst } links
+ */
+async function performMetaPost(ctx, contentData = {}) {
+  // ── Fetch phone number directly from MongoDB ──
   let phoneFromDb = '';
   try {
     const usersCollection = await getCollection("users");
@@ -174,208 +329,265 @@ async function postToMeta(ctx, mediaGroupProcessed = true) {
     );
     if (mongoUser?.phoneNr) {
       phoneFromDb = mongoUser.phoneNr;
-      console.log('[postToMeta] 📞 Phone fetched from MongoDB:', phoneFromDb);
+      console.log('[performMetaPost] 📞 Phone fetched from MongoDB:', phoneFromDb);
     }
   } catch (err) {
-    console.warn('[postToMeta] ⚠️ Could not fetch phone from MongoDB, falling back to session:', err.message);
+    console.warn('[performMetaPost] ⚠️ Could not fetch phone from MongoDB, falling back to session:', err.message);
   }
 
   const desc = buildMetaDescription(ctx, phoneFromDb);
+  const graph = `https://graph.facebook.com/v21.0`;
+
+  const pagesResponse = await axios.get(`${graph}/me/accounts`, {
+    headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` },
+  });
+
+  let pageAccessToken = null;
+  for (const page of pagesResponse.data.data) {
+    if (page.id === ctx.session.user.fb_page_id) {
+      pageAccessToken = page.access_token;
+      break;
+    }
+  }
+  if (!pageAccessToken) {
+    throw new Error("No page access token found for page ID: " + ctx.session.user.fb_page_id);
+  }
+
+  // ── Pre-check Instagram availability ──
+  let instagramId = null;
   try {
-    const graph = `https://graph.facebook.com/v21.0`;
-    const pagesResponse = await axios.get(`${graph}/me/accounts`, {
+    const instagramAccountResponse = await axios.get(
+      `${graph}/${ctx.session.user.fb_page_id}?fields=instagram_business_account`,
+      {
+        headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` },
+      }
+    );
+    if (instagramAccountResponse.data.instagram_business_account?.id) {
+      instagramId = instagramAccountResponse.data.instagram_business_account.id;
+    }
+  } catch (instErr) {
+    console.warn('[performMetaPost] ⚠️ Instagram check failed:', instErr.response?.data || instErr.message);
+  }
+
+  if (instagramId) {
+    console.log('[performMetaPost] ✅ Instagram Business Account found:', instagramId);
+  } else {
+    console.log('[performMetaPost] ℹ️ No Instagram Business Account linked.');
+  }
+
+  const pageGraph = `${graph}/${ctx.session.user.fb_page_id}`;
+  const photoIds = [];
+
+  // Upload images
+  const imagesToUpload = ctx.session.data.images || ctx.session.data.thumbnails || [];
+  for (const image of imagesToUpload) {
+    const imageUrl = typeof image === 'string' ? image : (image?.url || image?.src || null);
+    if (!imageUrl) {
+      console.warn('[performMetaPost] Skipping invalid image:', image);
+      continue;
+    }
+    const photoUpload = await axios.post(
+      `${pageGraph}/photos`,
+      { url: imageUrl, published: false },
+      { headers: { Authorization: `Bearer ${pageAccessToken}` } }
+    );
+    photoIds.push(photoUpload.data.id);
+  }
+
+  // Build feed params
+  const params = {
+    message: `${desc}`,
+    published: true,
+  };
+  if (photoIds.length > 0) {
+    params.attached_media = photoIds.map((photoId) =>
+      JSON.stringify({ media_fbid: photoId })
+    );
+  }
+
+  // Publish to Facebook
+  const retValueFB = await axios.post(`${pageGraph}/feed`, params, {
+    headers: { Authorization: `Bearer ${pageAccessToken}` },
+  });
+  const fbPostId = retValueFB.data.id;
+  const fbPostLink = `https://www.facebook.com/${ctx.session.user.fb_page_id}/posts/${fbPostId}`;
+
+  const retValue = { fb: fbPostLink, inst: null };
+
+  // ── Save posted record to MongoDB (deduplication) ──
+  try {
+    const contentHash = generateContentHash(ctx.session.data);
+    if (contentHash) {
+      await savePostedRecord({
+        postId: fbPostId,
+        contentHash,
+        platform: "facebook",
+        link: fbPostLink,
+        metadata: {
+          propertyType: getMetaPropertyType(ctx),
+          price: ctx.session.data?.price,
+          location: getMetaLocation(ctx),
+        },
+      });
+    }
+  } catch (saveErr) {
+    console.warn('[performMetaPost] ⚠️ Could not save posted record:', saveErr.message);
+  }
+
+  await ctx.reply(`✅ Postarea pe Facebook: ${fbPostLink}`);
+  console.log("Successfully posted on Facebook!", fbPostId);
+
+  // ── Instagram posting ──
+  if (!instagramId) {
+    await ctx.reply('ℹ️ Postarea pe Instagram a fost omisă — pagina Facebook nu are un cont Instagram de business conectat.');
+    return retValue;
+  }
+
+  await ctx.reply("Postarea pe Instagram in executie...");
+  const instContainersIds = [];
+
+  const instImagesToUpload = ctx.session.data.images || ctx.session.data.thumbnails || [];
+  for (const image of instImagesToUpload) {
+    const imageUrl = typeof image === 'string' ? image : (image?.url || image?.src || null);
+    if (!imageUrl) {
+      console.warn('[performMetaPost] Skipping invalid Instagram image:', image);
+      continue;
+    }
+    const mediaContainer = await axios.post(
+      `${graph}/${instagramId}/media`,
+      {
+        image_url: imageUrl,
+        caption: `${desc}`,
+        is_carousel_item: true,
+      },
+      { headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` } }
+    );
+    instContainersIds.push(mediaContainer.data.id);
+  }
+
+  // Create carousel
+  const carouselContainer = await axios.post(
+    `${graph}/${instagramId}/media`,
+    {
+      media_type: "CAROUSEL",
+      caption: `${desc}`,
+      children: instContainersIds.join(","),
+    },
+    { headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` } }
+  );
+
+  // Publish
+  const retValInst = await axios.post(
+    `${graph}/${instagramId}/media_publish`,
+    { creation_id: carouselContainer.data.id },
+    { headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` } }
+  );
+  const instMediaId = retValInst.data.id;
+  console.log("Instagram published successfully!", instMediaId);
+
+  // Fetch permalink
+  let instPostLink = '#';
+  try {
+    const instMediaResp = await axios.get(`${graph}/${instMediaId}`, {
+      params: { fields: 'permalink' },
       headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` },
     });
-    const retValue = {};
-    let pageAccessToken = null;
-    for (const page of pagesResponse.data.data) {
-      console.log(page);
-      if (page.id === ctx.session.user.fb_page_id) {
-        pageAccessToken = page.access_token;
-        break;
-      }
-    }
-    if (!pageAccessToken) {
-      return "facebook doesnt posted";
-    }
+    instPostLink = instMediaResp.data.permalink;
+  } catch (permalinkErr) {
+    console.warn('[performMetaPost] Could not fetch Instagram permalink:', permalinkErr.message);
+    instPostLink = `https://www.instagram.com/p/${instMediaId}/`;
+  }
 
-    // ── Pre-check Instagram availability BEFORE posting ─────────
-    let instagramId = null;
-    try {
-      const instagramAccountResponse = await axios.get(
-        `${graph}/${ctx.session.user.fb_page_id}?fields=instagram_business_account`,
-        {
-          headers: {
-            Authorization: `Bearer ${ctx.session.user.fb_acces_token}`,
-          },
-        }
-      );
-      if (instagramAccountResponse.data.instagram_business_account?.id) {
-        instagramId = instagramAccountResponse.data.instagram_business_account.id;
-      }
-    } catch (instErr) {
-      console.warn('[postToMeta] ⚠️ Instagram check failed:', instErr.response?.data || instErr.message);
-      // Non-fatal: proceed without Instagram
-    }
-
-    if (instagramId) {
-      console.log('[postToMeta] ✅ Instagram Business Account found:', instagramId);
-    } else {
-      console.log('[postToMeta] ℹ️ No Instagram Business Account linked — Instagram will be skipped.');
-    }
-
-    const pageGraph = `${graph}/${ctx.session.user.fb_page_id}`;
-    const photoIds = [];
-    // Support both string URLs and { url } objects
-    const imagesToUpload = ctx.session.data.images || ctx.session.data.thumbnails || [];
-    for (const image of imagesToUpload) {
-      const imageUrl = typeof image === 'string' ? image : (image?.url || image?.src || null);
-      if (!imageUrl) {
-        console.warn('[postToMeta] Skipping invalid image:', image);
-        continue;
-      }
-      const photoUpload = await axios.post(
-        `${pageGraph}/photos`,
-        { url: imageUrl, published: false },
-        { headers: { Authorization: `Bearer ${pageAccessToken}` } }
-      );
-      photoIds.push(photoUpload.data.id);
-    }
-
-    const params = {
-      message: `${desc}`,
-      published: true,
-    };
-    if (photoIds.length > 0) {
-      params.attached_media = [];
-    }
-    photoIds.forEach((photoId, index) => {
-      params.attached_media.push(
-        JSON.stringify({
-          media_fbid: photoId,
-        })
-      );
-    });
-    console.log(params);
-
-    // Publish post to Facebook
-    const retValueFB = await axios.post(`${pageGraph}/feed`, params, {
-      headers: { Authorization: `Bearer ${pageAccessToken}` },
-    });
-    const fbPostId = retValueFB.data.id;
-    const fbPostLink = `https://www.facebook.com/${ctx.session.user.fb_page_id}/posts/${fbPostId}`;
-    await ctx.reply(`✅ Postarea pe Facebook: ${fbPostLink}`);
-    console.log("Successfully posted on Facebook!", fbPostId);
-    retValue.fb = fbPostLink;
-
-    // ── Gracefully skip Instagram if no Business Account linked ─
-    if (!instagramId) {
-      await ctx.reply('ℹ️ Postarea pe Instagram a fost omisă — pagina Facebook nu are un cont Instagram de business conectat. Pentru a publica pe Instagram, conectați un cont Instagram de business în setările paginii Facebook.');
-      retValue.inst = null;
-      return retValue;
-    }
-
-    await ctx.reply("Postarea pe Instagram in executie...");
-    const instContainersIds = [];
-
-    // Create media containers for Instagram
-    const instImagesToUpload = ctx.session.data.images || ctx.session.data.thumbnails || [];
-    for (const image of instImagesToUpload) {
-      const imageUrl = typeof image === 'string' ? image : (image?.url || image?.src || null);
-      if (!imageUrl) {
-        console.warn('[postToMeta] Skipping invalid Instagram image:', image);
-        continue;
-      }
-      const mediaContainer = await axios.post(
-        `${graph}/${instagramId}/media`,
-        {
-          image_url: imageUrl,
-          caption: `${desc}`,
-          is_carousel_item: mediaGroupProcessed,
+  // ── Save Instagram posted record ──
+  try {
+    const contentHash = generateContentHash(ctx.session.data);
+    if (contentHash) {
+      await savePostedRecord({
+        postId: instMediaId,
+        contentHash,
+        platform: "instagram",
+        link: instPostLink,
+        metadata: {
+          propertyType: getMetaPropertyType(ctx),
+          price: ctx.session.data?.price,
         },
-        {
-          headers: {
-            Authorization: `Bearer ${ctx.session.user.fb_acces_token}`,
-          },
-        }
-      );
-      instContainersIds.push(mediaContainer.data.id);
-    }
-
-    // Create and publish carousel or single post on Instagram
-    let instContainerId;
-    if (mediaGroupProcessed) {
-      const carouselContainer = await axios.post(
-        `${graph}/${instagramId}/media`,
-        {
-          media_type: "CAROUSEL",
-          caption: `${desc}`,
-          children: instContainersIds.join(","),
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${ctx.session.user.fb_acces_token}`,
-          },
-        }
-      );
-      instContainerId = carouselContainer.data.id;
-    } else {
-      instContainerId = instContainersIds[0];
-    }
-
-    // Publish Instagram post
-    const retValInst = await axios.post(
-      `${graph}/${instagramId}/media_publish`,
-      { creation_id: instContainerId },
-      {
-        headers: {
-          Authorization: `Bearer ${ctx.session.user.fb_acces_token}`,
-        },
-      }
-    );
-    const instMediaId = retValInst.data.id;
-    console.log(
-      "The media has been published on Instagram successfully!",
-      instMediaId
-    );
-    // Fetch Instagram permalink
-    let instPostLink = '#';
-    try {
-      const instMediaResp = await axios.get(`${graph}/${instMediaId}`, {
-        params: { fields: 'permalink' },
-        headers: { Authorization: `Bearer ${ctx.session.user.fb_acces_token}` },
       });
-      instPostLink = instMediaResp.data.permalink;
-    } catch (permalinkErr) {
-      console.warn('[postToMeta] Could not fetch Instagram permalink:', permalinkErr.message);
-      // Fallback: construct URL from media ID
-      instPostLink = `https://www.instagram.com/p/${instMediaId}/`;
     }
-    await ctx.reply(`✅ Postarea pe Instagram: ${instPostLink}`);
-    retValue.inst = instPostLink;
-    return retValue;
-  } catch (error) {
-    console.error("An error occurred:", error.response?.data || error.message);
-    // Check for Facebook token expiration/invalidation
-    const fbError = error.response?.data?.error;
-    if (fbError?.code === 190) {
-      console.error('[postToMeta] ❌ Facebook token expired or invalidated. User needs to re-authenticate.');
-      // Try to use env fallback token if user's token failed
-      try {
-        if (process.env.FB_ACCES_TOKEN) {
-          console.log('[postToMeta] Attempting fallback with env FB_ACCES_TOKEN...');
-          ctx.session.user.fb_acces_token = process.env.FB_ACCES_TOKEN;
-          return await postToMeta(ctx, mediaGroupProcessed);
+  } catch (saveErr) {
+    console.warn('[performMetaPost] ⚠️ Could not save Instagram posted record:', saveErr.message);
+  }
+
+  await ctx.reply(`✅ Postarea pe Instagram: ${instPostLink}`);
+  retValue.inst = instPostLink;
+  return retValue;
+}
+
+/**
+ * postToMeta(ctx, mediaGroupProcessed, isRetry)
+ *
+ * Enhanced posting function with:
+ *   - Duplicate checking before posting
+ *   - Intelligent retry with exponential backoff
+ *   - Token refresh on error 190
+ *   - AI fallback for unknown errors
+ *   - NEVER throws — always returns gracefully
+ */
+async function postToMeta(ctx, mediaGroupProcessed = true, isRetry = false) {
+  try {
+    // ── STEP 1: Check for duplicate content ──
+    // Verifică DUPĂ publicare dacă postarea există deja
+    const contentHash = generateContentHash(ctx.session.data);
+
+    if (contentHash) {
+      const existingFB = await checkDuplicatePost(contentHash, "facebook");
+      if (existingFB) {
+        console.log(`[postToMeta] ⛔ Duplicate Facebook post detected. Last posted at ${existingFB.timestamp}. Skipping.`);
+        await ctx.reply(`⛔ Acest conținut a fost deja publicat pe Facebook acum. Link: ${existingFB.link || 'N/A'}`);
+        // Dar tot încercăm Instagram dacă nu a fost postat acolo
+        const existingIG = await checkDuplicatePost(contentHash, "instagram");
+        if (existingIG) {
+          console.log(`[postToMeta] ⛔ Duplicate Instagram post detected too. Skipping entirely.`);
+          return { fb: existingFB.link, inst: existingIG.link, skipped: true };
         }
-      } catch (fallbackErr) {
-        console.error('[postToMeta] ❌ Fallback token also failed:', fallbackErr.message);
-        await ctx.reply('❌ Token-ul Facebook a expirat. Trebuie să reautentificați contul Facebook. Contactați administratorul.');
       }
-      await ctx.reply('❌ Token-ul Facebook a expirat sau a fost invalidat. Conectați-vă din nou la Facebook.');
-    } else {
-      await ctx.reply('❌ A apărut o eroare la postarea pe Facebook/Instagram. Verificați token-ul și încercați din nou.');
     }
-    return {};
+
+    // ── STEP 2: Post with intelligent retry ──
+    const result = await postWithIntelligentRetry(
+      performMetaPost,
+      ctx,
+      ctx.session.data,
+      "facebook",
+      3 // Maxim 3 încercări principale (token refresh count ca reîncercări suplimentare)
+    );
+
+    if (result.success) {
+      return result.result;
+    }
+
+    // ── STEP 3: If all retries failed, log but DON'T interrupt ──
+    console.error('[postToMeta] ❌ All posting attempts failed:', result.error?.message || 'Unknown error');
+    console.error('[postToMeta] AI suggestion:', result.aiSuggestion);
+
+    await ctx.reply(
+      `⚠️ Postarea pe Facebook nu a reușit după mai multe încercări.\n` +
+      `Sugestie: ${result.aiSuggestion || 'Încercați din nou mai târziu.'}\n` +
+      `Procesul continuă cu alte platforme.`
+    );
+
+    return { fb: null, inst: null, error: result.error?.message || 'All retries failed' };
+  } catch (error) {
+    // ── ULTIMUL NIVEL DE SIGURANȚĂ: NICIODATĂ să nu oprească procesul ──
+    console.error('[postToMeta] ❌ CATASTROPHIC ERROR (but process continues):', error.message);
+    console.error(error.stack);
+
+    try {
+      await ctx.reply('⚠️ A apărut o eroare neașteptată la postarea pe Facebook. Procesul continuă cu alte operațiuni.');
+    } catch (replyErr) {
+      console.error('[postToMeta] ❌ Could not even send error message:', replyErr.message);
+    }
+
+    return { fb: null, inst: null, error: error.message };
   }
 }
 
