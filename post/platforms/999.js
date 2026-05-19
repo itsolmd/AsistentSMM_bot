@@ -1830,11 +1830,11 @@ const postTo999 = async (ctx) => {
   } else if (ctx.session.data.title) {
     titleValue = ctx.session.data.title;
   } else {
-    titleValue = `În vânzare ${
-      ctx.session.imobilType === "apartments" ? "apartament" :
-      ctx.session.imobilType === "houses" ? "casă" :
-      ctx.session.imobilType === "commercials" ? "spațiu comercial" : "teren"
-    }`;
+    titleValue = `${
+      ctx.session.imobilType === "apartments" ? "Apartament" :
+      ctx.session.imobilType === "houses" ? "Casă" :
+      ctx.session.imobilType === "commercials" ? "Spațiu comercial" : "Teren"
+    } in vanzare`;
   }
 
   // ═══════════════════════════════════════════════════════════════════
