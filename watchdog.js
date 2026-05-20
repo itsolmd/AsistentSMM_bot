@@ -18,7 +18,7 @@
 
 const logger = require("./logger");
 
-const WATCHDOG_TIMEOUT = parseInt(process.env.WATCHDOG_TIMEOUT || "10", 10); // minute
+const WATCHDOG_TIMEOUT = parseInt(process.env.WATCHDOG_TIMEOUT || "30", 10); // minute
 const WATCHDOG_INTERVAL = parseInt(process.env.WATCHDOG_INTERVAL || "30", 10); // seconds
 
 class Watchdog {

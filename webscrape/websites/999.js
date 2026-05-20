@@ -21,6 +21,12 @@ const {
   getLocationArrayForFilter,
 } = require('../../utils/regionParser');
 
+// ── AI-Powered Floor Extraction (3-Stage) ───────────────────
+// Se integrează în scraper pentru a garanta extragerea etajului
+// chiar și când selectoarele statice eșuează.
+const { aiExtractFloor } = require('../../ai/floorParserAI');
+const { enhanceListingData } = require('../../ai/contentEnhancer');
+
 /* ================================================================
    scrap_999 — Extrage datele unui anunț imobiliar de pe 999.md
    și le formatează pentru postare pe social media.
@@ -1291,16 +1297,116 @@ const scrap_999 = async (ctx, url) => {
 
     await browser.close();
 
+    // ── AI FLOOR PARSER FALLBACK (3-Stage) ──────────────────
+    // Dacă floor parsing-ul static a eșuat, folosim AI pentru
+    // a extrage etajul din HTML brut sau din context.
+    // STAGE 1: regex, STAGE 2: AI pe HTML, STAGE 3: AI inference.
+    // ══════════════════════════════════════════════════════════
+    // Initialize floorParsed from static extraction results (or null if N/A)
+    // This object is used by the AI floor parser fallback and the formatted text
+    const floorParsed = {
+      floor: extracted.floor !== 'N/A' && extracted.floor != null ? parseInt(extracted.floor, 10) || null : null,
+      totalFloors: extracted.totalFloors !== 'N/A' && extracted.totalFloors != null ? parseInt(extracted.totalFloors, 10) || null : null,
+    };
+    let floorAIUsed = false;
+    let floorAISource = 'static';
+
+    if (extracted.floor === 'N/A' || extracted.totalFloors === 'N/A' || !floorParsed.floor) {
+      console.log('');
+      console.log('⚠️ [SCRAP_999] Static floor parsing failed — activating AI floor parser (3-Stage)');
+      try {
+        const bodyText = extracted.bodyText || '';
+        const htmlSnippet = bodyText ? `<body>${bodyText.substring(0, 10000)}</body>` : null;
+        const aiFloorResult = await aiExtractFloor(
+          bodyText,                          // raw HTML (bodyText)
+          htmlSnippet,                        // HTML snippet for AI
+          {                                  // extracted data for context
+            title: extracted.title,
+            description: extracted.description,
+            bodyText: bodyText.substring(0, 5000),
+            building: extracted.building,
+            propertyType: extracted.propertyType,
+            location: extracted.location,
+          }
+        );
+
+        if (aiFloorResult.floor != null || aiFloorResult.floors != null) {
+          console.log(`[SCRAP_999] ✅ AI floor parser found: floor=${aiFloorResult.floor}, floors=${aiFloorResult.floors} (source: ${aiFloorResult.source})`);
+          
+          // Actualizează valorile doar dacă AI a găsit ceva
+          if (aiFloorResult.floor != null) {
+            floorParsed.floor = aiFloorResult.floor;
+            extracted.floor = String(aiFloorResult.floor);
+          }
+          if (aiFloorResult.floors != null) {
+            floorParsed.totalFloors = aiFloorResult.floors;
+            extracted.totalFloors = String(aiFloorResult.floors);
+          }
+          
+          floorAIUsed = true;
+          floorAISource = aiFloorResult.source || 'ai_enhanced';
+        } else {
+          console.log('[SCRAP_999] ⚠️ AI floor parser also failed — using defaults');
+        }
+      } catch (aiFloorErr) {
+        console.error('[SCRAP_999] ❌ AI floor parser error (non-blocking):', aiFloorErr.message);
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // AI CONTENT ENHANCEMENT — Completează date lipsă cu AI
+    // ══════════════════════════════════════════════════════════
+    let aiEnhancedAnyField = false;
+    try {
+      const partialData = {
+        type: extracted.propertyType,
+        rooms: extracted.rooms,
+        area: extracted.area,
+        floor: extracted.floor,
+        floors: extracted.totalFloors,
+        bathrooms: extracted.bathrooms,
+        building: extracted.building,
+        condition: extracted.condition,
+        heating: extracted.heating,
+        price: extracted.price,
+        description: extracted.description,
+        phoneNr: phoneNr,
+      };
+      
+      const enhanced = await enhanceListingData(partialData, extracted.bodyText || '');
+      
+      // Apply enhanced values where original is still N/A or missing
+      const checkAndApply = (target, sourceKey, extractedFallback) => {
+        if (target[sourceKey] && target[sourceKey] !== 'N/A' && target[sourceKey] !== '') {
+          if ((!extracted[extractedFallback] || extracted[extractedFallback] === 'N/A')) {
+            extracted[extractedFallback] = target[sourceKey];
+            aiEnhancedAnyField = true;
+            console.log(`[SCRAP_999] ✅ AI enhanced "${extractedFallback}": "${target[sourceKey]}"`);
+          }
+        }
+      };
+      
+      checkAndApply(enhanced, 'type', 'propertyType');
+      checkAndApply(enhanced, 'rooms', 'rooms');
+      checkAndApply(enhanced, 'area', 'area');
+      checkAndApply(enhanced, 'floor', 'floor');
+      checkAndApply(enhanced, 'floors', 'totalFloors');
+      checkAndApply(enhanced, 'bathrooms', 'bathrooms');
+      checkAndApply(enhanced, 'price', 'price');
+      checkAndApply(enhanced, 'phoneNr', null);
+      
+      if (enhanced.description && enhanced.description !== 'N/A' &&
+          (!extracted.description || extracted.description === 'N/A')) {
+        extracted.description = enhanced.description;
+        aiEnhancedAnyField = true;
+      }
+    } catch (aiEnhanceErr) {
+      console.error('[SCRAP_999] ❌ AI content enhancement error (non-blocking):', aiEnhanceErr.message);
+    }
+
     // ── 7. Construiește formattedText (BUG #1, #11 FIXED) ──────
     // Price numeric for filter URL (BUG #8)
     const priceNumeric = parsePriceToNumber(extracted.price);
-
-    // Floor parsing (BUG #6)
-    const floorParsed = parseFloorString(
-      extracted.floor !== 'N/A' && extracted.totalFloors !== 'N/A'
-        ? `${extracted.floor}/${extracted.totalFloors}`
-        : extracted.floor
-    );
 
     let formattedText = `${extracted.propertyType}.
 
@@ -1395,9 +1501,22 @@ const scrap_999 = async (ctx, url) => {
       link: fixedUrl,
       price: extracted.price || 'N/A',
       priceNumeric: priceNumeric || 0, // BUG #8: numeric price for filter URL
-      // BUG FIX v3.1: extracted.offerType defaults to 'N/A' (truthy string) so '|| 'Vând'' never fires.
-      // Use explicit ternary to fall back to 'Vând' when value is 'N/A'.
-      offerType: (extracted.offerType && extracted.offerType !== 'N/A') ? extracted.offerType : 'Vând',
+      // BUG FIX v4.0: offerType must be one of the VALID known values.
+      // 999.md can return garbage (e.g. "confecției);- Termopan...") when the
+      // CSS selectors or extractByLabel('Tipul', bodyText) match the WRONG content.
+      // Only accept values that match known offer types from OFFER_TYPE_MAP.
+      offerType: (() => {
+        const raw = (extracted.offerType && extracted.offerType !== 'N/A') ? extracted.offerType : null;
+        if (!raw) return 'Vând';
+        // Normalize for comparison
+        const normalized = raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+        // Valid normalized values from OFFER_TYPE_MAP
+        const VALID_OFFER_TYPES = ['vand', 'vinzare', 'vanzare', 'inchiriez', 'schimb', 'cumpar', 'cumpar'];
+        const isValid = VALID_OFFER_TYPES.some(v => normalized.includes(v));
+        if (isValid) return raw; // Keep original
+        console.warn(`[scrap_999] ⚠️ Invalid offerType "${raw}" — defaulting to "Vând"`);
+        return 'Vând';
+      })(),
       offerTypeId: extracted.offerTypeId || 776, // BUG FIX v3.0: numeric ID for filter URL (776 = Vând)
       regionText: extracted.location || 'Chișinău',
       // BUG #2, #3 FIXED: region array with correct order

@@ -67,6 +67,9 @@ function validateFilter(input) {
   // ── Verifică tip ofertă ──────────────────────────────────────────
   // BUG FIX v3.1: If offerType label is "N/A" but offerTypeId is valid,
   // resolve the label from OFFER_TYPE_ID_TO_LABEL map.
+  // BUG FIX v4.0: If offerType is unknown/garbage, default to "Vând"
+  // instead of failing validation. This prevents the filter from being
+  // completely unavailable when the scraper returns bad data.
   let offerTypeLabel = input?.offerType || input?.tip_oferta || null;
   if ((!offerTypeLabel || offerTypeLabel === "N/A") && input?.offerTypeId != null) {
     const resolvedLabel = OFFER_TYPE_ID_TO_LABEL[input.offerTypeId];
@@ -77,20 +80,18 @@ function validateFilter(input) {
   }
 
   if (!offerTypeLabel || offerTypeLabel === "N/A") {
-    errors.push({
-      field: "tip_oferta",
-      message: `Ce tip de ofertă dorești? Alege: ${FILTER_STRUCTURE.tip_oferta.join(" / ")}`,
-    });
+    // Offer type is missing entirely — default to "Vând" (most common)
+    console.warn('⚠️ [validateFilter] offerType missing — defaulting to "Vând"');
+    offerTypeLabel = "Vând";
   } else {
     const normalized = offerTypeLabel.toLowerCase().trim();
     const isValid = OFFER_TYPES.some(
       (ot) => ot.label.toLowerCase() === normalized
     );
     if (!isValid) {
-      errors.push({
-        field: "tip_oferta",
-        message: `Tipul de ofertă "${offerTypeLabel}" nu este recunoscut. Alege: ${FILTER_STRUCTURE.tip_oferta.join(" / ")}`,
-      });
+      // Offer type is garbage/unknown (e.g. scraper extracted wrong data)
+      console.warn(`⚠️ [validateFilter] Unrecognized offerType "${offerTypeLabel}" — defaulting to "Vând"`);
+      offerTypeLabel = "Vând";
     }
   }
 
@@ -648,12 +649,16 @@ const getFilter = async (adData, ctx) => {
     const validation = validateFilter(adData);
     if (!validation.valid) {
       console.warn("⚠️ [getFilter] Validation failed:", validation.message);
-      // Return structured validation message instead of empty URL
-      return JSON.stringify({
+      // BUG FIX v4.0: Return an object (NOT a JSON string) for consistency.
+      // The old behavior returned a JSON string which broke sendFilter's
+      // result?.filterUrl access (string.filterUrl is undefined).
+      // Now callers can always do result.filterUrl safely.
+      return {
+        filterUrl: "",
         error: "VALIDATION_FAILED",
         message: validation.message,
         structuredFilter: FILTER_STRUCTURE,
-      });
+      };
     }
 
     const { structuredFilter, priceNum, offerTypeLabel } = validation;

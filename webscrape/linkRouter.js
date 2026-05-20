@@ -26,6 +26,35 @@ const { processListingImages }   = require("../WaterMark-services/Dewatermark");
 /*───────────────────────────────────────────────────────────*/
 
 /**
+ * replyWithTimeout(ctx, text, extra, timeoutMs)
+ * -----------------------------------------------
+ * Wraps ctx.reply() with a configurable timeout to prevent
+ * indefinite hangs when the Telegram API is slow or
+ * unresponsive. If the reply times out, logs a warning
+ * and returns without throwing (graceful degradation).
+ *
+ * @param {Object}  ctx       - Telegraf context
+ * @param {string}  text      - Message text
+ * @param {Object}  extra     - Extra options for reply (parse_mode, etc.)
+ * @param {number}  timeoutMs - Timeout in ms (default: 15000)
+ * @returns {Promise<Object|null>} Message object or null on timeout/error
+ */
+async function replyWithTimeout(ctx, text, extra = {}, timeoutMs = 15000) {
+  try {
+    const result = await Promise.race([
+      ctx.reply(text, extra),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`ctx.reply timed out after ${timeoutMs}ms`)), timeoutMs)
+      ),
+    ]);
+    return result;
+  } catch (err) {
+    console.warn(`  ⚠️ [replyWithTimeout] ${err.message} — continuing without reply`);
+    return null;
+  }
+}
+
+/**
  * splitIntoBatches(array, batchSize)
  * Splits an array into chunks of `batchSize`.
  * Used to send Telegram media groups in batches of 10.
@@ -552,10 +581,10 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
     );
   } else {
     /* Pentru celelalte platforme trimitem filtrul */
-    await ctx.reply(await sendFilter(ctx, adData), {
+    await replyWithTimeout(ctx, await sendFilter(ctx, adData), {
       disable_web_page_preview: true,
       parse_mode: "Markdown",
-    });
+    }, 15000);
   }
 
   /*─── 3. Butoane de acțiune ───*/
@@ -572,16 +601,13 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
         Markup.button.callback("Edit",     "edit"),
       ]);
 
-  await ctx.reply("Ce doriți să faceți?", keyboard);
+  await replyWithTimeout(ctx, "Ce doriți să faceți?", keyboard, 15000);
   } catch (err) {
     // CRASH-PROOF: NEVER let returnInfoInChat throw — log error and notify user
     console.error('❌ [returnInfoInChat] CRITICAL ERROR (forțează continuarea):', err.message);
     console.error(err.stack);
-    try {
-      await ctx.reply('A apărut o eroare neașteptată, dar procesul continuă. Verificați log-urile.');
-    } catch (_) {
-      // Chiar și mesajul de eroare a eșuat — nu facem nimic, continuăm
-    }
+    // Use replyWithTimeout to prevent the error handler itself from hanging
+    await replyWithTimeout(ctx, 'A apărut o eroare neașteptată, dar procesul continuă. Verificați log-urile.', {}, 15000);
   }
 };
 /*───────────────────────────────────────────────────────────*/

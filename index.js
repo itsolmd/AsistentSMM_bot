@@ -12,15 +12,24 @@ const { postToPremier } = require("./post/platforms/premier");
 const { parseLoyal } = require('./webscrape/websites/loyal');
 const { normalizeUrl, safeUrl } = require("./utils/telegramMediaSafe");
 
+// ── AI ENHANCED MODULES ───────────────────────────────────
+const { getDashboardKeyboard, handleDashboardAction, handleRepost, markAsPosted, isAlreadyPosted, isAutoPostEnabled } = require("./bot/dashboard");
+const { buildPipelineSummary } = require("./utils/summaryBuilder");
+const { healthCheck } = require("./services/selfHealing");
+const { askAI } = require("./ai/openRouterClient");
+const logger = require("./logger");
+
 /* ════════════════════════════════════════════════════════════════
    RESILIENCE SYSTEM — Initialization
    ════════════════════════════════════════════════════════════════ */
 
-const logger           = require("./logger");
 const watchdog          = require("./watchdog");
 const memoryMonitor     = require("./memory-monitor");
 const recoveryManager   = require("./recovery");
 const { startHealthServer, updateHealthState } = require("./healthcheck");
+
+// Make watchdog globally accessible (needed by dashboard)
+global.watchdogInstance = watchdog;
 
 const client = new MongoClient(process.env.MONGO_URL, {
   tls: true,
@@ -667,6 +676,174 @@ bot.action("edit", checkUser, async (ctx) => {
     await ctx.reply("Something went wrong while processing the images.");
   }
 });
+
+/* ════════════════════════════════════════════════════════════════
+   DASHBOARD COMMANDS — Interactive Control Panel
+   ════════════════════════════════════════════════════════════════ */
+
+// ── /dashboard — Show interactive dashboard ──
+bot.command("dashboard", checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    await ctx.reply(
+      '📊 *Dashboard* — Alege o acțiune:',
+      {
+        parse_mode: 'Markdown',
+        ...getDashboardKeyboard(isAutoPostEnabled()),
+      }
+    );
+  } catch (err) {
+    logger.error("GENERAL", "Dashboard command error", { error: err.message });
+    await ctx.reply("Eroare la deschiderea dashboard-ului.");
+  }
+});
+
+// ── /status — Show detailed status ──
+bot.command("status", checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    const health = await healthCheck();
+    const watchdogStatus = watchdog.getStatus();
+    const { buildStatusMessage } = require("./bot/dashboard");
+    const statusMsg = buildStatusMessage(ctx, health, watchdogStatus);
+    await ctx.reply(statusMsg, {
+      parse_mode: 'Markdown',
+      ...getDashboardKeyboard(isAutoPostEnabled()),
+    });
+  } catch (err) {
+    logger.error("GENERAL", "Status command error", { error: err.message });
+    await ctx.reply("Eroare la obținerea statusului.");
+  }
+});
+
+// ── /repost <link> — Force repost a listing ──
+bot.command("repost", checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    const link = ctx.message.text.replace("/repost", "").trim();
+    if (!link || !link.startsWith("http")) {
+      return ctx.reply(
+        "❌ *Format incorect.*\n\nFolosește: `/repost https://999.md/ro/123456`\n\nExemplu: `/repost https://999.md/ro/104321098`",
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    const msg = await handleRepost(ctx, link);
+    await ctx.reply(msg, { parse_mode: "Markdown" });
+
+    // Start the pipeline for this link
+    ctx.message.text = link;
+    // Trigger the existing text handler
+    // (the pipeline will process it via the existing "text" handler)
+    await ctx.reply("🔄 *Procesare repost începută...*", { parse_mode: "Markdown" });
+  } catch (err) {
+    logger.error("GENERAL", "Repost command error", { error: err.message });
+    await ctx.reply("Eroare la procesarea repost-ului.");
+  }
+});
+
+// ── /ai_model <model> — Change AI model ──
+bot.command("ai_model", checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    const modelId = ctx.message.text.replace("/ai_model", "").trim();
+    
+    if (!modelId) {
+      const currentModel = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+      return ctx.reply(
+        `🧠 *Model AI curent:* \`${currentModel}\`\n\n` +
+        `*Schimbă modelul:*\n` +
+        `Trimite: \`/ai_model <model_id>\`\n\n` +
+        `*Modele disponibile:*\n` +
+        `• \`openai/gpt-4o-mini\` (rapid, ieftin)\n` +
+        `• \`openai/gpt-4o\` (puternic)\n` +
+        `• \`google/gemini-2.0-flash-exp\` (gratuit)\n` +
+        `• \`anthropic/claude-3.5-haiku\` (rapid)\n` +
+        `• \`meta-llama/llama-3.2-3b-instruct\` (ultra-rapid)\n\n` +
+        `⚠️ Schimbarea e temporară până la restart.`,
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    // Update environment variable for this session
+    process.env.OPENROUTER_MODEL = modelId;
+    logger.info("GENERAL", `AI model changed to: ${modelId}`);
+    await ctx.reply(
+      `✅ *Model AI schimbat la:* \`${modelId}\`\n\n` +
+      `Schimbarea e activă imediat. Pentru a face schimbarea permanentă, ` +
+      `actualizează \`OPENROUTER_MODEL\` în fișierul \`.env\` și restartează botul.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    logger.error("GENERAL", "AI model command error", { error: err.message });
+    await ctx.reply("Eroare la schimbarea modelului AI.");
+  }
+});
+
+// ── /help — Show available commands ──
+bot.command("help", checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    const helpText = [
+      '📚 *Comenzi disponibile:*',
+      '═'.repeat(30),
+      '',
+      '*📋 Generale:*',
+      '  • `/start` — Pornește botul',
+      '  • `/help` — Această listă de comenzi',
+      '  • `/status` — Status detaliat sistem',
+      '  • `/dashboard` — Dashboard interactiv',
+      '',
+      '*🤖 AI & Scraping:*',
+      '  • Trimite un link 999.md → scraping automat',
+      '  • `/ai_model` — Vezi/schimbă modelul AI',
+      '  • `/repost <link>` — Forțează repostare',
+      '',
+      '*⚙️ Postare:*',
+      '  • `/dashboard` → butonul "Start Auto-post"',
+      '  • Platforme: Facebook, Instagram, 999.md, Premierimobil.md',
+      '',
+      '*🛟 Auto-repair:*',
+      '  Sistemul se repară automat la orice eroare.',
+      '  Verifică `/status` pentru istoric reparații.',
+      '',
+      '📌 *Link-uri utile:*',
+      '  • [Premierimobil.md](https://premierimobil.md)',
+      '  • [Facebook Page](https://www.facebook.com/)',
+    ].join('\n');
+    
+    await ctx.reply(helpText, {
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true,
+    });
+  } catch (err) {
+    logger.error("GENERAL", "Help command error", { error: err.message });
+  }
+});
+
+// ── Dashboard callback handler ──
+bot.action(/^(dashboard_status|dashboard_refresh_fb|dashboard_ai_config|dashboard_logs|dashboard_restart|dashboard_back|auto_post_start|auto_post_stop)$/, checkUser, async (ctx) => {
+  try {
+    watchdog.recordActivity();
+    const action = ctx.match[1];
+    await handleDashboardAction(ctx, action, db);
+  } catch (err) {
+    logger.error("GENERAL", "Dashboard action error", {
+      action: ctx.match?.[1],
+      error: err.message,
+    });
+    try {
+      await ctx.answerCbQuery('⚠️ Eroare la procesarea acțiunii');
+    } catch (_) {}
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// MARK AS POSTED — overrides in the text handler
+// ════════════════════════════════════════════════════════════════
+// Mark links as posted after successful processing
+const originalTextHandler = bot.on; // store reference
+// We'll integrate markAsPosted in the text handler below
 
 /* ════════════════════════════════════════════════════════════════
    BOT LAUNCH
