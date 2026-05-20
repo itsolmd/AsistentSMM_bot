@@ -27,6 +27,12 @@ const {
 const { aiExtractFloor } = require('../../ai/floorParserAI');
 const { enhanceListingData } = require('../../ai/contentEnhancer');
 
+// ── Anti-Hallucination Page Validation ──────────────────────
+// Verifică dacă pagina există și conține un anunț valid
+// ÎNAINTE de a extrage orice date. Oprește pipeline-ul dacă
+// pagina e ștearsă, blocată sau inexistentă.
+const { isPageValid, extractBodyContent } = require('../../utils/pageValidator');
+
 /* ================================================================
    scrap_999 — Extrage datele unui anunț imobiliar de pe 999.md
    și le formatează pentru postare pe social media.
@@ -71,6 +77,72 @@ const scrap_999 = async (ctx, url) => {
     await page.goto(fixedUrl, { waitUntil: 'networkidle2' });
 
     console.log("✅ [SCRAP_999] Pagina încărcată cu succes");
+    console.log("");
+
+    // ══════════════════════════════════════════════════════════════
+    // ANTI-HALLUCINATION: PAGE VALIDATION
+    // ══════════════════════════════════════════════════════════════
+    // ÎNAINTE de a extrage orice date, verificăm dacă pagina
+    // conține un anunț VALID. Dacă e ștearsă/blocată/404,
+    // OPRIM COMPLET procesarea și returnăm eroare.
+    // ══════════════════════════════════════════════════════════════
+    const pageTitle = await page.title();
+    const pageHtml = await page.content();
+
+    // ── Detailed Validation Debug Logging ──────────────────────────
+    const bodyContent = extractBodyContent(pageHtml);
+    console.log('📄 [VALIDATION] === Detailed Page Validation Diagnostics ===');
+    console.log(`📄 [VALIDATION] Page title: "${pageTitle}"`);
+    console.log(`📄 [VALIDATION] HTML length: ${pageHtml.length} chars`);
+    console.log(`📄 [VALIDATION] Body content length: ${bodyContent.length} chars`);
+    console.log(`🔍 [VALIDATION] Has "Suprafață totală": ${pageHtml.includes('Suprafață totală')}`);
+    console.log(`🔍 [VALIDATION] Has "Număr de camere": ${pageHtml.includes('Număr de camere')}`);
+    console.log(`🔍 [VALIDATION] Has "Preț": ${pageHtml.includes('Preț')}`);
+    console.log(`🔍 [VALIDATION] Has "price": ${pageHtml.includes('price')}`);
+    console.log(`🔍 [VALIDATION] Has "Etaj": ${pageHtml.includes('Etaj')}`);
+    console.log(`🔍 [VALIDATION] Has price with currency (€/lei): ${/\d[\d\s]*(?:€|EUR|eur|lei|MDL)/.test(pageHtml)}`);
+    console.log(`🔍 [VALIDATION] Has area (m² with number): ${/\d+\s*m²/.test(pageHtml)}`);
+    console.log(`🔍 [VALIDATION] Has floor format (X/Y): ${/\d+\s*\/\s*\d+/.test(pageHtml)}`);
+    console.log(`🔍 [VALIDATION] Has __NEXT_DATA__: ${pageHtml.includes('__NEXT_DATA__')}`);
+    console.log(`🔍 [VALIDATION] Has "styles_group__feature__GsOUi": ${pageHtml.includes('styles_group__feature__GsOUi')}`);
+    console.log(`🔍 [VALIDATION] Has "Anunțul nu a fost găsit" in body (scripts removed): ${bodyContent.includes('Anunțul nu a fost găsit')}`);
+    console.log(`🔍 [VALIDATION] Has "Anunțul nu a fost găsit" in raw HTML: ${pageHtml.includes('Anunțul nu a fost găsit')}`);
+    console.log('');
+
+    const validation = isPageValid(pageHtml, { title: pageTitle, url: fixedUrl });
+    if (!validation.valid) {
+      console.error('');
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error(`❌ [SCRAP_999] PAGE VALIDATION FAILED`);
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error(`  📄 URL:     ${fixedUrl}`);
+      console.error(`  📌 Titlu:   ${pageTitle}`);
+      console.error(`  🚫 Motiv:   ${validation.reason}`);
+      if (validation.details) {
+        console.error(`  📊 Detalii: ${JSON.stringify(validation.details)}`);
+      }
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error('');
+      await browser.close();
+      return {
+        error: true,
+        type: 'PAGE_NOT_FOUND',
+        reason: validation.reason,
+        link: fixedUrl,
+        title: pageTitle,
+      };
+    }
+
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log(`✅ [SCRAP_999] PAGE VALIDATION PASSED`);
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log(`  📄 URL:     ${fixedUrl}`);
+    console.log(`  📌 Titlu:   ${pageTitle}`);
+    console.log(`  ✅ Motiv:   ${validation.reason}`);
+    if (validation.details) {
+      console.log(`  📊 Detalii: ${JSON.stringify(validation.details)}`);
+    }
+    console.log('═══════════════════════════════════════════════════════════');
     console.log("");
 
     // ── 3. Extrage datele din pagină (fără CSS classes) ────────
@@ -1523,10 +1595,14 @@ const scrap_999 = async (ctx, url) => {
       region: getLocationArrayForFilter(parsedLocation),
       // Parsed location components
       parsedLocation,
-      rooms: extracted.rooms !== 'N/A' && extracted.rooms != null ? extracted.rooms : '1',
-      area: extracted.area !== 'N/A' && extracted.area != null ? extracted.area : '50',
-      floor: floorParsed.floor !== null ? String(floorParsed.floor) : (extracted.floor !== 'N/A' ? extracted.floor : '1'),
-      floors: floorParsed.totalFloors !== null ? String(floorParsed.totalFloors) : (extracted.totalFloors !== 'N/A' ? extracted.totalFloors : '1'),
+      // ANTI-HALLUCINATION: NU mai folosim fallback-uri hardcodate!
+      // Dacă un câmp nu există în pagină, returnăm null — NU inventăm '1', '50', etc.
+      // Pipeline-ul downstream (postare, filtre) trebuie să oprească postarea
+      // când câmpurile obligatorii sunt null.
+      rooms: extracted.rooms !== 'N/A' && extracted.rooms != null ? extracted.rooms : null,
+      area: extracted.area !== 'N/A' && extracted.area != null ? extracted.area : null,
+      floor: floorParsed.floor !== null ? String(floorParsed.floor) : (extracted.floor !== 'N/A' ? extracted.floor : null),
+      floors: floorParsed.totalFloors !== null ? String(floorParsed.totalFloors) : (extracted.totalFloors !== 'N/A' ? extracted.totalFloors : null),
       bathrooms: extracted.bathrooms || 1,
       building: extracted.building || 'Construcţii noi',
       title: extracted.title || 'Anunț imobiliar',

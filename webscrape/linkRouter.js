@@ -316,6 +316,36 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
   try {
     if (!adData) return ctx.reply("Nu am putut extrage datele.");
 
+    // ══════════════════════════════════════════════════════════════
+    // ANTI-HALLUCINATION: PAGE NOT FOUND
+    // ══════════════════════════════════════════════════════════════
+    // Dacă scraperul a returnat { error: true, type: 'PAGE_NOT_FOUND' },
+    // înseamnă că pagina e ștearsă/blocată/404. Oprim COMPLET procesarea.
+    // ══════════════════════════════════════════════════════════════
+    if (adData.error === true) {
+      console.error('');
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error(`❌ [LINK_ROUTER] ANUNȚ INVALID — PROCESARE OPRITĂ`);
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error(`  🔗 Link:     ${adData.link || 'N/A'}`);
+      console.error(`  🚫 Motiv:    ${adData.reason || 'Pagină invalidă'}`);
+      console.error(`  📌 Titlu:    ${adData.title || 'N/A'}`);
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error('');
+
+      await ctx.reply(
+        `⚠️ *Anunțul nu mai există!*\n\n` +
+        `🔗 Link: ${adData.link || 'N/A'}\n` +
+        `📝 Motiv: ${adData.reason || 'Pagină ștearsă sau blocată'}\n\n` +
+        `❌ *Nu se poate posta* — pagina a fost ștearsă, ` +
+        `blocată sau nu există.\n\n` +
+        `✅ Anti-halucinare: Sistemul a detectat și oprit ` +
+        `procesarea înainte de a genera date false.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
     console.log("");
     console.log("═══════════════════════════════════════════════════════════");
     console.log("📨 [LINK ROADER] PRELUCRARE ANUNȚ");

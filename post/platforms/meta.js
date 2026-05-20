@@ -434,7 +434,8 @@ async function performMetaPost(ctx, contentData = {}) {
     console.warn('[performMetaPost] ⚠️ Could not save posted record:', saveErr.message);
   }
 
-  await ctx.reply(`✅ Postarea pe Facebook: ${fbPostLink}`);
+  // Nu trimitem ctx.reply aici — postRouter se ocupă de mesajul final
+  // cu toate link-urile (FB + IG)
   console.log("Successfully posted on Facebook!", fbPostId);
 
   // ── Instagram posting ──
