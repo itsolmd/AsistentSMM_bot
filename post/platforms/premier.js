@@ -251,7 +251,8 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
     if (ctx.session?.data) {
       console.error("❌ [postToPremier] ctx.session.data keys:", Object.keys(ctx.session.data));
     }
-    return ctx.reply("Eroare: datele anunțului sunt goale. Reîncercați.");
+    await ctx.reply("Eroare: datele anunțului sunt goale. Reîncercați.");
+    throw new Error("Empty data object in postToPremier");
   }
 
   // ── FALLBACK: If parsedLocation is missing or has no city, use hardcoded address ──

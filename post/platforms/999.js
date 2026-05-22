@@ -512,7 +512,7 @@ const extractFeaturesId = async (ctx, type) => {
   return features.data;
 };
 
-const extractFeatures = (data, featuresObj, ctx) => {
+const extractFeatures = (data, featuresObj, ctx, imobilType) => {
   const features = [];
 
   const findFeatureByTitle = (title) => {
@@ -578,7 +578,7 @@ const extractFeatures = (data, featuresObj, ctx) => {
   // Including a phone feature causes "Numărul de telefon nu a fost găsit" (400) error.
   // The phoneNr is kept in session.data for Telegram display only.
 
-  if (ctx.session.imobilType === "apartments") {
+  if (imobilType === "apartments") {
     if (data.features) {
       data.features.forEach((title) => {
         console.log("tesst12");
@@ -841,7 +841,7 @@ const extractFeatures = (data, featuresObj, ctx) => {
         }
       }
     }
-  } else if (ctx.session.imobilType === "houses") {
+  } else if (imobilType === "houses") {
     if (data.house_feature) {
       data.house_feature.forEach((title) => {
         console.log("tesst12");
@@ -898,9 +898,12 @@ const extractFeatures = (data, featuresObj, ctx) => {
       const feature = findFeatureByTitle("Tip");
       console.log(feature);
       if (feature) {
+        const houseTypeValue = typeof data.house_type === 'string'
+          ? data.house_type
+          : data.house_type?.ro || '';
         const optionId = findOptionIdByTitle(
           feature.options,
-          data.house_type.ro
+          houseTypeValue
         );
         if (optionId) {
           features.push({ id: feature.id, value: optionId });
@@ -986,7 +989,10 @@ const extractFeatures = (data, featuresObj, ctx) => {
           "Reparație euro": "Euroreparație",
           "Reparație medie": "Reparație cosmetică",
         };
-        const conditionTitle = conditionMap[data.condition.ro];
+        const conditionValue = typeof data.condition === 'string'
+          ? data.condition
+          : data.condition?.ro || '';
+        const conditionTitle = conditionMap[conditionValue];
         const optionId = findOptionIdByTitle(feature.options, conditionTitle);
         if (optionId) {
           features.push({ id: feature.id, value: optionId });
@@ -1000,7 +1006,7 @@ const extractFeatures = (data, featuresObj, ctx) => {
       }`,
     });
     ////gata feature case
-  } else if (ctx.session.imobilType === "commercials") {
+  } else if (imobilType === "commercials") {
     if (data.commercial_features) {
       data.commercial_features.forEach((title) => {
         const feature = findFeatureByTitle(title.ro);
@@ -1020,7 +1026,10 @@ const extractFeatures = (data, featuresObj, ctx) => {
           "Comercial": "Comercial",
           "Depozit/ Producere": "Depozit",
         };
-        const conditionTitle = conditionMap[data.commercial_destination.ro];
+        const destValue = typeof data.commercial_destination === 'string'
+          ? data.commercial_destination
+          : data.commercial_destination?.ro || '';
+        const conditionTitle = conditionMap[destValue];
         const optionId = findOptionIdByTitle(feature.options, conditionTitle);
         if (optionId) {
           features.push({ id: feature.id, value: optionId });
@@ -1043,7 +1052,10 @@ const extractFeatures = (data, featuresObj, ctx) => {
           "Reparație euro": "Euroreparație",
           "Reparație medie": "Reparație cosmetică",
         };
-        const conditionTitle = conditionMap[data.condition.ro];
+        const conditionValue = typeof data.condition === 'string'
+          ? data.condition
+          : data.condition?.ro || '';
+        const conditionTitle = conditionMap[conditionValue];
         const optionId = findOptionIdByTitle(feature.options, conditionTitle);
         if (optionId) {
           features.push({ id: feature.id, value: optionId });
@@ -1051,15 +1063,9 @@ const extractFeatures = (data, featuresObj, ctx) => {
       }
     }
 
-    features.push({
-      id: "12",
-      value: `Spatiu comercial cu ${data.area}m2 spre vanzare, in ${
-        data.suburb ? data.suburb.ro : data.sector.ro
-      }`,
-    });
   }
   ////gata feature comerciale
-  else if (ctx.session.imobilType === "terrains") {
+  else if (imobilType === "terrains") {
     if (data.area) {
       const feature = findFeatureByTitle("Suprafață teren");
       if (feature) {
@@ -1079,7 +1085,10 @@ const extractFeatures = (data, featuresObj, ctx) => {
           //prettier-ignore
           "Pomicol": "Teren agricol",
         };
-        const conditionTitle = conditionMap[data.terrain_destination.ro];
+        const terrainDestValue = typeof data.terrain_destination === 'string'
+          ? data.terrain_destination
+          : data.terrain_destination?.ro || '';
+        const conditionTitle = conditionMap[terrainDestValue];
         const optionId = findOptionIdByTitle(feature.options, conditionTitle);
         if (optionId) {
           features.push({ id: feature.id, value: optionId });
@@ -1090,7 +1099,7 @@ const extractFeatures = (data, featuresObj, ctx) => {
     features.push({
       id: "12",
       value: `Lot de pamant de ${data.area} ari spre vanzare, in ${
-        data.suburb ? data.suburb.ro : data.sector.ro
+        data.suburb?.ro || data.suburb || data.sector?.ro || data.sector || data.parsedLocation?.sector || ''
       }`,
     });
   }
@@ -1309,6 +1318,133 @@ function ensureRequiredFields(features, featuresIdData, data, imobilType) {
     }
   }
 
+  // ── Commercials support — add price (id:2) and area (id:244) if missing ──
+  if (imobilType === "commercials") {
+    // Price (id:2)
+    if (!hasFeature("2")) {
+      let priceVal = data.priceNumeric;
+      if (!priceVal && data.price) {
+        priceVal = parseInt(String(data.price).replace(/[^\d]/g, ''), 10);
+      }
+      if (priceVal && !isNaN(priceVal)) {
+        features.push({ id: "2", value: priceVal, unit: "eur" });
+        console.log('[ensureRequiredFields] ✅ Added missing Price (id:2) for commercials:', priceVal, 'eur');
+      }
+    }
+
+    // Area — look up by title "Suprafață totală" from API features
+    const areaFeatureId = findFeatureIdByTitle("Suprafață totală");
+    if (!hasFeature(areaFeatureId) && data.area != null && areaFeatureId) {
+      const areaVal = parseInt(data.area, 10);
+      if (!isNaN(areaVal)) {
+        // Check if the feature needs a unit
+        const feature = featureApiMap[areaFeatureId];
+        const unit = feature?.units?.includes("m2") ? "m2" : undefined;
+        features.push({ id: areaFeatureId, value: areaVal, ...(unit ? { unit } : {}) });
+        console.log('[ensureRequiredFields] ✅ Added missing Area for commercials (id:' + areaFeatureId + '):', areaVal, unit || '');
+      }
+    }
+
+    // Floor — look up by title "Etaj" from API features
+    const floorFeatureId = findFeatureIdByTitle("Etaj");
+    if (!hasFeature(floorFeatureId) && data.floor != null && floorFeatureId) {
+      if (featureApiMap[floorFeatureId]?.options) {
+        const optId = findOptionId(floorFeatureId, String(data.floor));
+        if (optId) {
+          features.push({ id: floorFeatureId, value: optId });
+          console.log('[ensureRequiredFields] ✅ Added missing Floor for commercials (id:' + floorFeatureId + '):', data.floor, '→ option:', optId);
+        }
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // GENERIC REQUIRED FEATURE FALLBACK (BUG FIX)
+  // Iterates through ALL features from the API response and fills in
+  // any required features that are still missing with sensible defaults.
+  // This prevents "Completați câmpul" (400) errors for features like
+  // "257" that are required by the API but not explicitly handled above.
+  // ═══════════════════════════════════════════════════════════════════
+  // Skip features that are always added in postTo999:
+  //   12 (title), 13 (description), 14 (images), 795 (author type)
+  //   and location features (7, 8, 9, 10, 11)
+  const ALWAYS_HANDLED_ELSEWHERE = new Set(['12', '13', '14', '795', '7', '8', '9', '10', '11', '16']);
+  
+  for (const group of (featuresIdData.features_groups || [])) {
+    for (const apiFeature of (group.features || [])) {
+      const featId = String(apiFeature.id);
+      
+      // Skip features that are:
+      //   - Not required
+      //   - Already present in features array
+      //   - Always handled elsewhere (title, desc, images, author, location)
+      //   - Price (id:2) — already handled above
+      //   - Author type (id:795) — handled in postTo999
+      if (!apiFeature.required) continue;
+      if (hasFeature(featId)) continue;
+      if (ALWAYS_HANDLED_ELSEWHERE.has(featId)) continue;
+      
+      // Add missing required feature with sensible default based on type
+      let defaultValue = null;
+      
+      switch (apiFeature.type) {
+        case 'drop_down_options':
+          // Pick the first available option
+          if (apiFeature.options && apiFeature.options.length > 0) {
+            defaultValue = apiFeature.options[0].id;
+            console.log(`[ensureRequiredFields] ⚠️ Missing required dropdown "${apiFeature.title}" (id:${featId}) — using first option: "${apiFeature.options[0].title}" (id:${defaultValue})`);
+          } else {
+            console.warn(`[ensureRequiredFields] ❌ Cannot fill missing dropdown "${apiFeature.title}" (id:${featId}) — no options available`);
+          }
+          break;
+          
+        case 'check_box':
+          defaultValue = false;
+          console.log(`[ensureRequiredFields] ⚠️ Missing required checkbox "${apiFeature.title}" (id:${featId}) — defaulting to false`);
+          break;
+          
+        case 'textbox_text':
+        case 'textarea_text':
+          defaultValue = '';
+          console.log(`[ensureRequiredFields] ⚠️ Missing required text field "${apiFeature.title}" (id:${featId}) — defaulting to empty string`);
+          break;
+          
+        case 'textbox_numeric':
+          defaultValue = 0;
+          console.log(`[ensureRequiredFields] ⚠️ Missing required numeric field "${apiFeature.title}" (id:${featId}) — defaulting to 0`);
+          break;
+          
+        case 'textbox_numeric_measurement':
+          defaultValue = 0;
+          const defaultUnit = apiFeature.units?.[0];
+          if (defaultUnit) {
+            console.log(`[ensureRequiredFields] ⚠️ Missing required measurement "${apiFeature.title}" (id:${featId}) — defaulting to 0 ${defaultUnit}`);
+          } else {
+            console.log(`[ensureRequiredFields] ⚠️ Missing required measurement "${apiFeature.title}" (id:${featId}) — defaulting to 0`);
+          }
+          break;
+          
+        case 'upload_images':
+          defaultValue = [];
+          console.log(`[ensureRequiredFields] ⚠️ Missing required images field "${apiFeature.title}" (id:${featId}) — defaulting to empty array`);
+          break;
+          
+        default:
+          console.warn(`[ensureRequiredFields] ❓ Unknown feature type "${apiFeature.type}" for required field "${apiFeature.title}" (id:${featId}) — skipping`);
+          continue; // Skip unknown types — don't add invalid data
+      }
+      
+      if (defaultValue !== null) {
+        const featureObj = { id: featId, value: defaultValue };
+        // Add unit if available for measurement types
+        if (apiFeature.type === 'textbox_numeric_measurement' && apiFeature.units?.[0]) {
+          featureObj.unit = apiFeature.units[0];
+        }
+        features.push(featureObj);
+      }
+    }
+  }
+
   console.log('[ensureRequiredFields] Final feature count:', features.length);
   return features;
 }
@@ -1348,21 +1484,46 @@ function buildFallbackFeatures(data) {
   }
 
   // Condition
-  if (data.condition?.ro || data.condition) {
-    const conditionText = typeof data.condition === 'string' ? data.condition : data.condition?.ro;
-    fallback.push({ id: '12', value: `Stare: ${conditionText}` });
+  const conditionVal = data.condition;
+  if (conditionVal) {
+    const conditionText = typeof conditionVal === 'string' ? conditionVal : (conditionVal?.ro || '');
+    if (conditionText) {
+      fallback.push({ id: '12', value: `Stare: ${conditionText}` });
+    }
   }
 
-  // Building type
-  if (data.building?.ro || data.building) {
-    const buildingText = typeof data.building === 'string' ? data.building : data.building?.ro;
-    fallback.push({ id: '12', value: `Bloc: ${buildingText}` });
+  // Building type — handles string ("Secundar"), number, or object ({ro: "..."})
+  const buildingVal = data.building;
+  if (buildingVal != null && buildingVal !== '') {
+    let buildingText = '';
+    if (typeof buildingVal === 'string') {
+      buildingText = buildingVal;
+    } else if (typeof buildingVal === 'number') {
+      buildingText = String(buildingVal);
+    } else if (buildingVal?.ro) {
+      buildingText = buildingVal.ro;
+    } else if (buildingVal?.title) {
+      buildingText = buildingVal.title;
+    }
+    if (buildingText) {
+      fallback.push({ id: '12', value: `Bloc: ${buildingText}` });
+    }
   }
 
-  // Heating
-  if (data.heating?.ro || data.heating) {
-    const heatText = typeof data.heating === 'string' ? data.heating : data.heating?.ro;
-    fallback.push({ id: '12', value: `Încălzire: ${heatText}` });
+  // Heating — handles numeric ID (1=Autonomă, 2=Centralizată), string, or object ({ro: "..."})
+  const heatingVal = data.heating;
+  if (heatingVal != null && heatingVal !== '') {
+    let heatText = '';
+    if (typeof heatingVal === 'number') {
+      heatText = heatingVal === 1 ? 'Autonomă' : heatingVal === 2 ? 'Centralizată' : String(heatingVal);
+    } else if (typeof heatingVal === 'string') {
+      heatText = heatingVal;
+    } else if (heatingVal?.ro) {
+      heatText = heatingVal.ro;
+    }
+    if (heatText) {
+      fallback.push({ id: '12', value: `Încălzire: ${heatText}` });
+    }
   }
 
   // Balcony
@@ -1376,11 +1537,11 @@ function buildFallbackFeatures(data) {
     fallback.push({ id: '12', value: desc.slice(0, 500) });
   }
 
-  // Location info
+  // Location info — safe access, fallback to parsedLocation
   const locationParts = [
-    data.suburb?.ro || data.suburb || '',
-    data.sector?.ro || data.sector || '',
-    data.city || '',
+    data.suburb?.ro || data.suburb || data.parsedLocation?.suburb || '',
+    data.sector?.ro || data.sector || data.parsedLocation?.sector || '',
+    data.parsedLocation?.city || data.city || '',
   ].filter(Boolean);
   if (locationParts.length > 0) {
     fallback.push({ id: '12', value: locationParts.join(', ') });
@@ -1452,6 +1613,26 @@ function inferImobilType(ctx) {
   // ── Stage 2: Detect from session.data fields ──
   const data = ctx.session.data;
   if (!data) return 'apartments'; // safest default
+
+  // ── ⚠️ BUG FIX: Strengthen apartment detection ──
+  // The scraper may incorrectly set data.type="Comercial" and
+  // data.commercial_destination="Comercial" for apartment listings
+  // (false positive in hasCommercialKeywords).
+  // Solution: Check for STRONG apartment indicators FIRST.
+  //
+  // Strong apartment signal: rooms + (area or floor or floors)
+  // Apartment-specific fields override commercial_destination
+  if (
+    data.rooms != null &&
+    (data.area != null || data.floor != null || data.floors != null)
+  ) {
+    console.log(
+      '[inferImobilType] ✅ Strong apartment signal (rooms=' + data.rooms +
+      ', area=' + data.area + ') — overriding data.type="' +
+      (data.type || 'N/A') + '"'
+    );
+    return 'apartments';
+  }
 
   // 999.md/immobiliare/loyal scrapers store type as display string
   const AD_TYPE_MAP = {
@@ -1665,22 +1846,52 @@ const postTo999 = async (ctx) => {
   // If we got featuresIdData from API, run the normal extractFeatures
   if (featuresIdData) {
     try {
-      features = extractFeatures(ctx.session.data, featuresIdData, ctx);
+      features = extractFeatures(ctx.session.data, featuresIdData, ctx, safeImobilType);
       console.log('[extractFeatures] Initial features count:', features.length, features);
 
-      // BUG FIX v3.1: ensureRequiredFields fills in missing critical fields
-      // that extractFeatures may have skipped due to findFeatureByTitle mismatches.
-      // This adds features like price (id:2), area (id:244), rooms (id:248),
-      // floor (id:9), bathrooms (id:249), building (id:852), etc.
+      // Run ensureRequiredFields to fill in missing critical fields
       features = ensureRequiredFields(features, featuresIdData, ctx.session.data, safeImobilType);
       console.log('[extractFeatures] After ensureRequiredFields — features count:', features.length);
     } catch (extractErr) {
       console.error('[postTo999] extractFeatures failed:', extractErr.message);
-      // Fallback to minimal features
+      // Fallback to minimal features from session data
       const fallbackFeatures = buildFallbackFeatures(ctx.session.data);
       if (fallbackFeatures && fallbackFeatures.length > 0) {
         features = fallbackFeatures;
         console.log('[postTo999] ✅ Created', features.length, 'fallback features after extractFeatures failure');
+        // BUG FIX: Even for fallback features, add critical required fields (price, area)
+        // using hardcoded IDs since we don't have API feature data in this fallback path
+        try {
+          const enhancedFeatures = [...features];
+          const data = ctx.session.data || {};
+          const hasId = (id) => enhancedFeatures.some(f => String(f.id) === String(id));
+
+          // Price (id:2)
+          if (!hasId('2')) {
+            let priceVal = data.priceNumeric;
+            if (!priceVal && data.price) {
+              priceVal = parseInt(String(data.price).replace(/[^\d]/g, ''), 10);
+            }
+            if (priceVal && !isNaN(priceVal)) {
+              enhancedFeatures.push({ id: '2', value: priceVal, unit: 'eur' });
+              console.log('[postTo999] ✅ Fallback added missing Price (id:2):', priceVal, 'eur');
+            }
+          }
+
+          // Area (id:244)
+          if (!hasId('244') && data.area != null) {
+            const areaVal = parseInt(data.area, 10);
+            if (!isNaN(areaVal)) {
+              enhancedFeatures.push({ id: '244', value: areaVal, unit: 'm2' });
+              console.log('[postTo999] ✅ Fallback added missing Area (id:244):', areaVal, 'm2');
+            }
+          }
+
+          features = enhancedFeatures;
+          console.log('[postTo999] ✅ Enhanced fallback features with required fields — count:', features.length);
+        } catch (enhanceErr) {
+          console.warn('[postTo999] ⚠️ Could not enhance fallback features:', enhanceErr.message);
+        }
       } else {
         return console.log("nu au putut fi extrase caracteristicile");
       }
@@ -1734,7 +1945,9 @@ const postTo999 = async (ctx) => {
   if (categoryId === "270") {
     // ── Imobiliare — use existing description logic ──
     const sessionData = ctx.session.data || {};
-    if (ctx.session.imobilType === "apartments") {
+    // BUG FIX: Use normalized safeImobilType instead of raw ctx.session.imobilType
+    // ctx.session.imobilType may be "Comercial" while safeImobilType is "commercials"
+    if (safeImobilType === "apartments") {
       subcategory = "1404";
       // Use human-readable location names instead of numeric IDs from location array
       const cityName = sessionData.parsedLocation?.city || sessionData.region?.[1] || location[1]?.value || '';
@@ -1758,7 +1971,7 @@ const postTo999 = async (ctx) => {
                ? "1 bloc sanitar"
                : `${sessionData.bathrooms} blocuri sanitare`
            } și antreu.`;
-    } else if (ctx.session.imobilType === "houses") {
+    } else if (safeImobilType === "houses") {
       subcategory = "1406";
       // Use human-readable location names instead of numeric IDs from location array
       const cityName = sessionData.parsedLocation?.city || sessionData.region?.[1] || location[1]?.value || '';
@@ -1782,29 +1995,31 @@ const postTo999 = async (ctx) => {
                ? "1 grup sanitar"
                : `${sessionData.bathrooms} grupuri sanitare`
            }.`;
-    } else if (ctx.session.imobilType === "commercials") {
+    } else if (safeImobilType === "commercials") {
       subcategory = "1405";
+      const commDest = ctx.session.data.commercial_destination;
+      const commDestText = typeof commDest === 'string'
+        ? commDest
+        : commDest?.ro || '';
+      const commLocation = ctx.session.data.suburb?.ro || ctx.session.data.suburb
+        || ctx.session.data.sector?.ro || ctx.session.data.sector
+        || ctx.session.data.parsedLocation?.sector || '';
       desc = `În vânzare spațiu comercial${
-        ctx.session.data.commercial_destination?.ro
-          ? `, tip ${ctx.session.data.commercial_destination.ro}`
-          : ""
-      }, amplasat în ${
-        ctx.session.data.suburb
-          ? ctx.session.data.suburb.ro
-          : ctx.session.data.sector?.ro || ""
-      }.
+        commDestText ? `, tip ${commDestText}` : ""
+      }, amplasat în ${commLocation}.
           Spațiul comercial are o suprafață de ${ctx.session.data.area} m².`;
-    } else if (ctx.session.imobilType === "terrains") {
+    } else if (safeImobilType === "terrains") {
       subcategory = "1407";
+      const terrDest = ctx.session.data.terrain_destination;
+      const terrDestText = typeof terrDest === 'string'
+        ? terrDest
+        : terrDest?.ro || '';
+      const terrLocation = ctx.session.data.suburb?.ro || ctx.session.data.suburb
+        || ctx.session.data.sector?.ro || ctx.session.data.sector
+        || ctx.session.data.parsedLocation?.sector || '';
       desc = `În vânzare teren${
-        ctx.session.data.terrain_destination?.ro
-          ? `, tip ${ctx.session.data.terrain_destination.ro}`
-          : ""
-      }, amplasat în ${
-        ctx.session.data.suburb
-          ? ctx.session.data.suburb.ro
-          : ctx.session.data.sector?.ro || ""
-      }.
+        terrDestText ? `, tip ${terrDestText}` : ""
+      }, amplasat în ${terrLocation}.
           Terenul are o suprafață de ${ctx.session.data.area} m².`;
     }
   } else {

@@ -33,17 +33,17 @@ const sendFilter = async (ctx, data) => {
     if (!filterUrl) {
       console.warn("⚠️ [sendFilter] Filter URL is empty, returning fallback");
       return `Link : ${linkText}
-  Proprietar: ${data.phoneNr || "Nu a fost indicat"}
+  Proprietar: ${data.phoneNr || "Nu are Nr,Vezi poate are mai multe anunturi  caci aicic nu are Nr Nu a fost indicat"}
   [Filtru](N/A)`;
     }
     return `Link : ${linkText}
-  Proprietar: ${data.phoneNr || "Nu a fost indicat"}
+  Proprietar: ${data.phoneNr || "Nu are Nr,Vezi poate are mai multe anunturi  caci aicic nu are Nr Nu a fost indicat"}
   [Filtru](${filterUrl})`;
   } catch (error) {
     console.error("❌ [sendFilter] Error generating filter:", error.message);
     const linkText = getLinkText(ctx);
     return `Link : ${linkText}
-  Proprietar: ${data.phoneNr || "Nu a fost indicat"}
+  Proprietar: ${data.phoneNr || "Nu are Nr,Vezi poate are mai multe anunturi  caci aicic nu are Nr Nu a fost indicat"}
   [Filtru](N/A — eroare la generare)`;
   }
 };

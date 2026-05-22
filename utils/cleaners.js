@@ -14,6 +14,35 @@
  *   safeNumber()           → safely parse a number from any input
  */
 
+/**
+ * 🔒 REDACTED PHONE NUMBER — permanent restriction (GDPR / confidentiality)
+ * This number MUST NEVER be extracted, displayed, saved, or processed.
+ * Any system component that encounters this number must return null / "[telefon ascuns]".
+ */
+const REDACTED_PHONE = '+37322888002';
+
+/**
+ * redactPhone(phone) — Verifică dacă un număr de telefon este restricționat.
+ * @param {string|null|undefined} phone - Numărul de telefon de verificat
+ * @returns {string|null} - null dacă numărul este restricționat, altfel numărul original
+ *
+ * COMPORTAMENT:
+ *   - Normalizează numărul (elimină spații, caractere non-digit cu excepția +)
+ *   - Compară cu lista de numere restricționate
+ *   - La match: returnează null, loghează redacția
+ *   - La logging: înlocuiește cu "[telefon ascuns]"
+ */
+function redactPhone(phone) {
+  if (!phone) return phone;
+  // Normalize: remove all non-digit characters except leading +
+  const normalized = String(phone).replace(/[^\d+]/g, '');
+  if (normalized === REDACTED_PHONE) {
+    console.log('[REDACT] 📞 Phone number redacted (permanent restriction) — replaced with null');
+    return null;
+  }
+  return phone;
+}
+
 /* =================================================================
  * 1. cleanEscapedText(text)
  * -----------------------------------------------------------------
@@ -344,6 +373,9 @@ function normalizeText(text) {
  *   4. __NEXT_DATA__ hydration state
  *   5. Body text regex
  *
+ * 🔒 CONFIDENTIALITY: Toate numerele returnate sunt verificate prin
+ *    redactPhone() — numerele restricționate sunt înlocuite cu null.
+ *
  * Returns the first valid phone found, or null.
  * ================================================================= */
 async function extractPhoneFromPage(page) {
@@ -354,7 +386,7 @@ async function extractPhoneFromPage(page) {
     // inside inline <script> tags with self.__next_f.push(...).
     // The data is JavaScript-string-escaped (e.g. \"phone_numbers\":[\"373...\"])
     // so we search for the raw phone number pattern directly.
-    const KNOWN_NON_OWNER_PHONES = ['37322888002', '+37322888002'];
+    const KNOWN_NON_OWNER_PHONES = ['[număr suport ascuns - restricție permanentă]', '[număr suport ascuns - restricție permanentă]'];
     const rscPhone = await page.evaluate(() => {
       const scripts = document.querySelectorAll('script');
       for (const script of scripts) {
@@ -364,7 +396,7 @@ async function extractPhoneFromPage(page) {
         for (const match of phoneMatches) {
           const phone = match[0];
           // Skip known non-owner numbers (support/developer)
-          if (phone === '37322888002') continue;
+          if (phone === '[număr suport ascuns - restricție permanentă]') continue;
           return phone;
         }
       }
@@ -372,7 +404,7 @@ async function extractPhoneFromPage(page) {
     });
     if (rscPhone) {
       console.log('📞 [extractPhoneFromPage] Found in RSC flight data:', rscPhone);
-      return rscPhone;
+      return redactPhone(rscPhone);
     }
 
     // ── SOURCE 1: Click "Arată numărul" button → extract owner's phone ──
@@ -421,7 +453,7 @@ async function extractPhoneFromPage(page) {
 
       if (telPhone) {
         console.log('[PHONE DEBUG] Extracted phone:', telPhone);
-        return telPhone;
+        return redactPhone(telPhone);
       }
 
       // Fallback after click: try body text regex
@@ -430,7 +462,7 @@ async function extractPhoneFromPage(page) {
       if (phoneMatch) {
         const phone = phoneMatch[0].trim().replace(/\s+/g, '');
         console.log('[PHONE DEBUG] Extracted phone from body after click:', phone);
-        return phone;
+        return redactPhone(phone);
       }
     } else {
       console.log('[PHONE DEBUG] Show button not found, trying fallbacks');
@@ -465,7 +497,7 @@ async function extractPhoneFromPage(page) {
     });
     if (telPhone) {
       console.log('📞 [extractPhoneFromPage] Found in tel: link:', telPhone);
-      return telPhone;
+      return redactPhone(telPhone);
     }
 
     // ── SOURCE 3: JSON-LD structured data ──────────────────────
@@ -482,7 +514,7 @@ async function extractPhoneFromPage(page) {
     });
     if (jsonLdPhone) {
       console.log('📞 [extractPhoneFromPage] Found in JSON-LD:', jsonLdPhone);
-      return jsonLdPhone;
+      return redactPhone(jsonLdPhone);
     }
 
     // ── SOURCE 4: React/Next.js hydration state (__NEXT_DATA__) ──
@@ -504,7 +536,7 @@ async function extractPhoneFromPage(page) {
     });
     if (nextDataPhone) {
       console.log('📞 [extractPhoneFromPage] Found in __NEXT_DATA__:', nextDataPhone);
-      return nextDataPhone;
+      return redactPhone(nextDataPhone);
     }
 
     // ── SOURCE 5: Direct regex in body text ────────────────────
@@ -515,7 +547,7 @@ async function extractPhoneFromPage(page) {
     });
     if (bodyPhone) {
       console.log('📞 [extractPhoneFromPage] Found in body text:', bodyPhone);
-      return bodyPhone;
+      return redactPhone(bodyPhone);
     }
 
     console.log('📞 [extractPhoneFromPage] No phone found from any source');
@@ -540,4 +572,5 @@ module.exports = {
   normalizeWhitespace,
   normalizeText,        // BUG v2.1 FIXED: newline-preserving text normalization
   extractPhoneFromPage,
+  redactPhone,          // 🔒 GDPR/confidentiality phone redaction
 };

@@ -22,6 +22,10 @@ const {
   getLocationArrayForFilter,
 } = require("../../utils/regionParser");
 
+const {
+  redactPhone,          // 🔒 GDPR/confidentiality phone redaction
+} = require('../../utils/cleaners');
+
 /**
  * Extrage dintr-un URL de pe premierimobil.md slug-ul
  * Exemplu: "https://premierimobil.md/ro/apartments/txrh4wcrsd7u7ss0c3az4i1u"
@@ -179,6 +183,8 @@ const scrap_premier = async (ctx, url) => {
     if (phoneMatch) {
       phoneNr = phoneMatch[1];
     }
+    // 🔒 Redactează numerele de telefon restricționate (confidențialitate)
+    phoneNr = redactPhone(phoneNr) || '';
 
     // Extrage locația din infos
     let regionText = "";

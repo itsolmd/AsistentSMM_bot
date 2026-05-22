@@ -722,26 +722,28 @@ const getFilter = async (adData, ctx) => {
     console.log("🔍 [getFilter] Offer type label:", offerTypeLabel, "→ ID:", offerTypeId);
 
     // ── HEATING (feature 2203) ───────────────────────────────────
-    // Map Strapi heating ID (1=Autonomă, 2=Centralizată) to 999.md filter option ID
-    // TODO: Verify these option IDs by querying 999.md API
+    // Map Strapi heating ID (1=Autonomă, 2=Centralizată) to 999.md filter option ID.
+    // Returns null when option ID is unknown — the caller skips the filter param.
+    // TODO: Replace null with actual 999.md filter option IDs once verified via API.
     const getHeatingFilterOptionId = (heatingId) => {
-      if (heatingId === 1) return 'TODO_AUTONOMOUS_OPTION_ID';  // Autonomă
-      if (heatingId === 2) return 'TODO_CENTRALIZED_OPTION_ID'; // Centralizată
+      if (heatingId === 1) return null;  // Autonomă — option ID unknown
+      if (heatingId === 2) return null;  // Centralizată — option ID unknown
       return null;
     };
     const heatingOptionId = adData.heating != null ? getHeatingFilterOptionId(adData.heating) : null;
-    console.log("🔍 [getFilter] Heating ID:", adData.heating, "→ filter option:", heatingOptionId);
+    console.log("🔍 [getFilter] Heating ID:", adData.heating, "→ filter option:", heatingOptionId, "(null = skipped)");
 
     // ── BALCONY (feature 1192) ───────────────────────────────────
-    // Map Strapi balcony ID (1=Da, 2=Nu) to 999.md filter option ID
-    // TODO: Verify these option IDs by querying 999.md API
+    // Map Strapi balcony ID (1=Da, 2=Nu) to 999.md filter option ID.
+    // Returns null when option ID is unknown — the caller skips the filter param.
+    // TODO: Replace null with actual 999.md filter option IDs once verified via API.
     const getBalconyFilterOptionId = (balconyId) => {
-      if (balconyId === 1) return 'TODO_YES_OPTION_ID';  // Da/Balcon
-      if (balconyId === 2) return 'TODO_NO_OPTION_ID';   // Nu/Fără balcon
+      if (balconyId === 1) return null;  // Da/Balcon — option ID unknown
+      if (balconyId === 2) return null;  // Nu/Fără balcon — option ID unknown
       return null;
     };
     const balconyOptionId = adData.balcony != null ? getBalconyFilterOptionId(adData.balcony) : null;
-    console.log("🔍 [getFilter] Balcony ID:", adData.balcony, "→ filter option:", balconyOptionId);
+    console.log("🔍 [getFilter] Balcony ID:", adData.balcony, "→ filter option:", balconyOptionId, "(null = skipped)");
 
     // ── BUILDING TYPE ────────────────────────────────────────────
     // Normalize building string for comparison (handle object {ro: "..."} or string)

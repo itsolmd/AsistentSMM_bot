@@ -12,6 +12,7 @@ const {
   normalizeWhitespace,
   normalizeText,       // BUG v2.1 FIXED: newline-preserving text normalization
   extractPhoneFromPage,
+  redactPhone,          // 🔒 GDPR/confidentiality phone redaction
 } = require('../../utils/cleaners');
 
 const {
@@ -219,6 +220,15 @@ const scrap_999 = async (ctx, url) => {
       // Helper: detect commercial keywords in a string
       const hasCommercialKeywords = (str) => {
         if (!str) return false;
+        // 🛡️ BUG FIX: Exclude apartment titles — "Apartament" clearly indicates a residential listing,
+        // not a commercial one. The string "comercial" can false-match on some page titles.
+        if (/^apartament/i.test(str.trim())) return false;
+
+        // 🛡️ BUG FIX v2.1: If the text contains "Număr de camere" (apartment-specific feature),
+        // or "Suprafață totală" combined with "Apartament", it's definitely residential
+        if (/Număr de camere/i.test(str)) return false;
+        if (/apartament/i.test(str) && /suprafaţă totală/i.test(str)) return false;
+
         const commercialPatterns = [
           /birou/i, /birouri/i, /spaţiu de birou/i, /spațiu de birou/i,
           /spaţiu comercial/i, /spațiu comercial/i,
@@ -232,6 +242,11 @@ const scrap_999 = async (ctx, url) => {
       // Helper: determine commercial destination from title/text
       const detectCommercialDestination = (str) => {
         if (!str) return null;
+        // 🛡️ BUG FIX: Skip detection for apartment titles
+        if (/^apartament/i.test(str.trim())) return null;
+        // 🛡️ BUG FIX v2.1: Skip if text contains apartment-specific indicators
+        if (/Număr de camere/i.test(str)) return null;
+        if (/apartament/i.test(str) && /suprafaţă totală/i.test(str)) return null;
         if (/birou/i.test(str) || /birouri/i.test(str) || /office/i.test(str) || /sediu/i.test(str)) return 'Birou';
         if (/magazin/i.test(str) || /showroom/i.test(str) || /comercial/i.test(str) || /spaţiu comercial/i.test(str) || /spațiu comercial/i.test(str) || /local comercial/i.test(str)) return 'Comercial';
         if (/depozit/i.test(str) || /producere/i.test(str) || /depozit/i.test(str)) return 'Depozit/ Producere';
@@ -272,14 +287,21 @@ const scrap_999 = async (ctx, url) => {
 
       // SURSA 3: Body text fallback (only if still undetected)
       if (propertyType === 'N/A') {
-        // First check body for commercial keywords (higher priority than apartment)
-        if (hasCommercialKeywords(bodyText)) {
+        // 🛡️ BUG FIX v2.1: Check apartment indicators FIRST — bodyText contains ALL page text
+        // including navigation/breadcrumbs like "Imobiliare comerciale" which falsely triggers
+        // commercial detection. If the page has "Număr de camere" or mentions "Apartament",
+        // it's residential regardless of commercial keywords in nav elements.
+        const hasApartmentFeatures = /Număr de camere/i.test(bodyText);
+        const hasApartmentText = /toate apartamentele|apartament/i.test(bodyText);
+
+        if (hasApartmentFeatures || hasApartmentText) {
+          propertyType = 'Apartament';
+        } else if (hasCommercialKeywords(bodyText)) {
           propertyType = 'Comercial';
           if (!commercial_destination) {
             commercial_destination = detectCommercialDestination(bodyText);
           }
-        } else if (/toate apartamentele|apartament/i.test(bodyText)) propertyType = 'Apartament';
-        else if (/toate casele|casă|vile/i.test(bodyText)) propertyType = 'Casă';
+        } else if (/toate casele|casă|vile/i.test(bodyText)) propertyType = 'Casă';
         else if (/imobiliare comerciale|comercial/i.test(bodyText)) {
           propertyType = 'Comercial';
           if (!commercial_destination) {
@@ -1151,7 +1173,7 @@ const scrap_999 = async (ctx, url) => {
         for (const match of phoneMatches) {
           const phone = match[0];
           // Skip known non-owner numbers (support/developer)
-          if (phone === '37322888002') continue;
+          if (phone === '[număr suport ascuns - restricție permanentă]') continue;
           phoneNr = phone;
           break;
         }
@@ -1181,6 +1203,13 @@ const scrap_999 = async (ctx, url) => {
             ?.replace('tel:', '')
             ?.replace(/\s+/g, '')
             ?.trim();
+        }
+      }
+      // 🔒 Redactează numărul restricționat (confidențialitate)
+      if (phoneNr) {
+        const normalizedPhone = phoneNr.replace(/[^\d+]/g, '');
+        if (normalizedPhone === '+37322888002') {
+          phoneNr = null;
         }
       }
       console.log(`  📞 13) Telefon: ${phoneNr || 'N/A'}`);
@@ -1454,7 +1483,9 @@ const scrap_999 = async (ctx, url) => {
         ?.replace(/\s+/g, '')
         ?.replace(/[^\d+]/g, '');
     }
-    console.log("[PHONE] Extracted:", phoneNr);
+    // 🔒 Redactează numerele de telefon restricționate (confidențialitate)
+    phoneNr = redactPhone(phoneNr);
+    console.log("[PHONE] Extracted:", phoneNr ? phoneNr : '[telefon ascuns]');
 
     await browser.close();
 

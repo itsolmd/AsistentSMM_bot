@@ -542,6 +542,20 @@ bot.action("watermark_yes_post", checkUser, async (ctx) => {
     ctx.session.removeWatermark = true;
     await ctx.editMessageText("Postare în execuție cu eliminare watermark...");
     logger.info("GENERAL", "Posting with watermark removal", { platforms: ctx.session.selectedPlatforms });
+
+    // ── RESILIENCE: Try to restore from MongoDB if session.data is lost ──
+    // This handles the case where a watchdog restart wiped the in-memory
+    // Telegraf session between platform selection and actual posting.
+    if (!ctx.session.data || typeof ctx.session.data !== 'object' || Object.keys(ctx.session.data).length === 0) {
+      console.warn('⚠️ [watermark_yes_post] session.data is empty — attempting MongoDB restore...');
+      const restored = await restoreSessionDataFromMongo(ctx, db);
+      if (!restored) {
+        console.error('❌ [watermark_yes_post] session.data empty AND MongoDB restore failed — aborting');
+        return ctx.reply('Eroare: datele anunțului s-au pierdut. Trimiteți din nou link-ul.');
+      }
+      console.log('✅ [watermark_yes_post] session.data restored from MongoDB');
+    }
+
     await postRouter(ctx);
     ctx.session.selectedPlatforms = [];
   } catch (error) {
@@ -557,6 +571,19 @@ bot.action("watermark_no_post", checkUser, async (ctx) => {
     watchdog.recordActivity();
     ctx.session.removeWatermark = false;
     await ctx.editMessageText("Postare în execuție...");
+
+    // ── RESILIENCE: Try to restore from MongoDB if session.data is lost ──
+    // This handles the case where a watchdog restart wiped the in-memory
+    // Telegraf session between platform selection and actual posting.
+    if (!ctx.session.data || typeof ctx.session.data !== 'object' || Object.keys(ctx.session.data).length === 0) {
+      console.warn('⚠️ [watermark_no_post] session.data is empty — attempting MongoDB restore...');
+      const restored = await restoreSessionDataFromMongo(ctx, db);
+      if (!restored) {
+        console.error('❌ [watermark_no_post] session.data empty AND MongoDB restore failed — aborting');
+        return ctx.reply('Eroare: datele anunțului s-au pierdut. Trimiteți din nou link-ul.');
+      }
+      console.log('✅ [watermark_no_post] session.data restored from MongoDB');
+    }
     logger.info("GENERAL", "Posting without watermark removal", { platforms: ctx.session.selectedPlatforms });
     await postRouter(ctx);
     ctx.session.selectedPlatforms = [];

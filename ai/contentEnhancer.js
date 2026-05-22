@@ -25,6 +25,7 @@
 
 const { askAI, extractJsonFromAI } = require('./openRouterClient');
 const logger = require('../logger');
+const { redactPhone } = require('../utils/cleaners');
 
 // ================================================================
 // CÂMPURI INTERZISE PENTRU AI — anti-halucinare
@@ -186,6 +187,14 @@ async function enhanceListingData(data, rawHtml = '') {
 
     if (blockedCount > 0) {
       console.log(`[contentEnhancer] 🚫 Anti-hallucination: ${blockedCount} câmp(uri) blocate`);
+    }
+
+    // 🔒 Redactează numerele de telefon restricționate în datele returnate
+    if (data.phoneNr) {
+      data.phoneNr = redactPhone(data.phoneNr);
+    }
+    if (data.telefon) {
+      data.telefon = redactPhone(data.telefon);
     }
 
     return data;
