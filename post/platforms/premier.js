@@ -365,6 +365,46 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
     "Teren":               "terrains",
     "terrains":            "terrains",
   };
+
+  // ════════════════════════════════════════════════════════════════
+  // BUG FIX: Title-based type override (safety net)
+  // ════════════════════════════════════════════════════════════════
+  // If the scraper misclassified a commercial property as "Apartament",
+  // this heuristic will catch it by checking the title and area.
+  // ════════════════════════════════════════════════════════════════
+  const commercialTitlePatterns = [
+    /birou/i, /birouri/i, /spaţiu de birou/i, /spațiu de birou/i,
+    /spaţiu comercial/i, /spațiu comercial/i,
+    /office/i, /magazin/i, /depozit/i, /local comercial/i,
+    /sediu/i, /showroom/i,
+  ];
+  const hasCommercialTitle = data.title && commercialTitlePatterns.some(p => p.test(data.title));
+  const areaNumeric = data.area ? parseInt(String(data.area).replace(/[^0-9]/g, ''), 10) : 0;
+
+  if (data.type === "Apartament" && hasCommercialTitle) {
+    console.log(`🔍 [postToPremier] ⚠️ Title-based override: "${data.type}" → "Comercial" (title: "${data.title}")`);
+    data.type = "Comercial";
+    // Infer commercial destination from title if not already set
+    if (!data.commercial_destination) {
+      if (/birou/i.test(data.title) || /birouri/i.test(data.title) || /office/i.test(data.title) || /sediu/i.test(data.title)) {
+        data.commercial_destination = 'Birou';
+      } else if (/magazin/i.test(data.title) || /showroom/i.test(data.title) || /comercial/i.test(data.title)) {
+        data.commercial_destination = 'Comercial';
+      } else if (/depozit/i.test(data.title)) {
+        data.commercial_destination = 'Depozit/ Producere';
+      } else if (/spaţiu/i.test(data.title) || /spațiu/i.test(data.title)) {
+        data.commercial_destination = 'Birou';
+      }
+    }
+  } else if (data.type === "Apartament" && areaNumeric > 0 && areaNumeric < 20) {
+    // Heuristic: very small area (< 20 m²) is unlikely to be a real apartment
+    console.log(`🔍 [postToPremier] ⚠️ Area-based heuristic: area=${areaNumeric}m² is too small for apartment — reclassifying as commercial`);
+    data.type = "Comercial";
+    if (!data.commercial_destination) {
+      data.commercial_destination = 'Birou';
+    }
+  }
+
   const canonicalType = typeMap[data.type] || null;
   console.log(`🔍 [postToPremier] Original type: "${data.type}" → Canonical: "${canonicalType}"`);
 
@@ -472,7 +512,15 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
     dataToSend = {
       data: {
         //obligatorii in db
-        rooms: data.rooms,
+        rooms: (() => {
+          // Convert null, undefined, empty string, "N/A", or any non-numeric value to 1
+          // Strapi expects a `number` type, not null or NaN
+          // NEVER returns null — always falls back to 1 to prevent Strapi validation errors
+          const v = data.rooms;
+          if (v == null || v === "" || v === "N/A") return 1;
+          const n = parseInt(v, 10);
+          return isNaN(n) ? 1 : n;
+        })(),
         area: data.area,
         // BUG #8 FIXED: price must be numeric, not "97.000 €"
         price: parsePriceToNumber(data.price),
@@ -736,11 +784,27 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
           hardcodedConditions(data.condition),
           "conditions"
         ),
-        commercial_destination: await matchFieldId(
-          ctx,
-          hardcodedCommercialDest(data.commercial_destination),
-          "commercial-destinations"
-        ),
+        commercial_destination: await (async () => {
+          // BUG FIX: Use data.commercial_destination from scraper if available,
+          // otherwise try to infer from title, or fall back to default
+          let dest = data.commercial_destination;
+          if (!dest && data.title) {
+            if (/birou/i.test(data.title) || /birouri/i.test(data.title) || /office/i.test(data.title) || /sediu/i.test(data.title)) {
+              dest = 'Birou';
+            } else if (/magazin/i.test(data.title) || /showroom/i.test(data.title) || /comercial/i.test(data.title)) {
+              dest = 'Comercial';
+            } else if (/depozit/i.test(data.title)) {
+              dest = 'Depozit/ Producere';
+            }
+          }
+          const matchedId = await matchFieldId(
+            ctx,
+            hardcodedCommercialDest(dest),
+            "commercial-destinations"
+          );
+          console.log(`[COMMERCIAL DEST] title="${data.title}", dest="${dest}" → ID: ${matchedId}`);
+          return matchedId;
+        })(),
         infos: await (async () => {
           let filterUrl = "";
           try {

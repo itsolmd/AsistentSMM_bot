@@ -209,22 +209,110 @@ const scrap_999 = async (ctx, url) => {
       console.log(`  🆔 1) ID anunț: ${advertId}`);
 
       // ── 2. Tip proprietate ──────────────────────────────────────
+      // SURSE (în ordinea priorității):
+      //   1. Title keywords — detectează "Spațiu de birou", "Oficiu" etc.
+      //   2. Subcategorie 999.md (advert.categories.subcategory.title)
+      //   3. Body text fallback
       let propertyType = 'N/A';
-      if (advert?.categories?.subcategory?.title) {
+      let commercial_destination = null; // For commercial sub-type detection
+
+      // Helper: detect commercial keywords in a string
+      const hasCommercialKeywords = (str) => {
+        if (!str) return false;
+        const commercialPatterns = [
+          /birou/i, /birouri/i, /spaţiu de birou/i, /spațiu de birou/i,
+          /spaţiu comercial/i, /spațiu comercial/i,
+          /comercial/i, /office/i, /magazin/i, /depozit/i,
+          /local comercial/i, /sediu/i, /showroom/i,
+          /spaţiu/i, /spațiu/i,  // "Spațiu de..." pattern
+        ];
+        return commercialPatterns.some(p => p.test(str));
+      };
+
+      // Helper: determine commercial destination from title/text
+      const detectCommercialDestination = (str) => {
+        if (!str) return null;
+        if (/birou/i.test(str) || /birouri/i.test(str) || /office/i.test(str) || /sediu/i.test(str)) return 'Birou';
+        if (/magazin/i.test(str) || /showroom/i.test(str) || /comercial/i.test(str) || /spaţiu comercial/i.test(str) || /spațiu comercial/i.test(str) || /local comercial/i.test(str)) return 'Comercial';
+        if (/depozit/i.test(str) || /producere/i.test(str) || /depozit/i.test(str)) return 'Depozit/ Producere';
+        // Default for generic "Spațiu" entries without specific destination
+        if (/spaţiu/i.test(str) || /spațiu/i.test(str)) return 'Birou';
+        return null;
+      };
+
+      // SURSA 1: Title (highest priority — "Spațiu de birou" in title overrides any subcategory)
+      const h2Title = document.querySelector('h2');
+      const pageTitleStr = document.title || '';
+      const h2Text = h2Title ? h2Title.textContent.trim() : '';
+      const combinedTitle = pageTitleStr || h2Text;
+
+      if (hasCommercialKeywords(combinedTitle)) {
+        propertyType = 'Comercial';
+        commercial_destination = detectCommercialDestination(combinedTitle);
+        console.log(`  🏠 2) Tip proprietate: ${propertyType} (din titlu: "${combinedTitle}")`);
+        if (commercial_destination) {
+          console.log(`  🏬 2a) Destinație comercială: ${commercial_destination} (din titlu)`);
+        }
+      }
+
+      // SURSA 2: Subcategorie 999.md (only if not already determined by title)
+      if (propertyType === 'N/A' && advert?.categories?.subcategory?.title) {
         const sub = advert.categories.subcategory.title;
         if (/apartamente/i.test(sub)) propertyType = 'Apartament';
         else if (/case/i.test(sub) || /vile/i.test(sub)) propertyType = 'Casă';
-        else if (/comercial/i.test(sub)) propertyType = 'Comercial';
+        else if (/comercial/i.test(sub)) {
+          propertyType = 'Comercial';
+          if (!commercial_destination) {
+            commercial_destination = detectCommercialDestination(sub);
+          }
+        }
         else if (/teren/i.test(sub) || /loturi/i.test(sub)) propertyType = 'Teren';
         else propertyType = sub;
       }
+
+      // SURSA 3: Body text fallback (only if still undetected)
       if (propertyType === 'N/A') {
-        if (/toate apartamentele|apartament/i.test(bodyText)) propertyType = 'Apartament';
+        // First check body for commercial keywords (higher priority than apartment)
+        if (hasCommercialKeywords(bodyText)) {
+          propertyType = 'Comercial';
+          if (!commercial_destination) {
+            commercial_destination = detectCommercialDestination(bodyText);
+          }
+        } else if (/toate apartamentele|apartament/i.test(bodyText)) propertyType = 'Apartament';
         else if (/toate casele|casă|vile/i.test(bodyText)) propertyType = 'Casă';
-        else if (/imobiliare comerciale|comercial/i.test(bodyText)) propertyType = 'Comercial';
+        else if (/imobiliare comerciale|comercial/i.test(bodyText)) {
+          propertyType = 'Comercial';
+          if (!commercial_destination) {
+            commercial_destination = detectCommercialDestination(bodyText);
+          }
+        }
         else if (/loturi de teren|teren/i.test(bodyText)) propertyType = 'Teren';
       }
+
+      // SURSA 4: Heuristic fallback — if no rooms field AND area < 25 m², likely commercial
+      if (propertyType === 'Apartament') {
+        const areaRaw = extractByLabel('Suprafață totală', bodyText);
+        const areaNum = areaRaw ? parseInt(extractNumber(areaRaw) || '0', 10) : 0;
+        const hasRoomsLabel = /Număr de camere/i.test(bodyText);
+
+        if (!hasRoomsLabel && areaNum > 0 && areaNum < 25) {
+          console.log(`  ⚠️ 2) Heuristic: Area ${areaNum}m² without "Număr de camere" — likely commercial, overriding "Apartament"`);
+          propertyType = 'Comercial';
+          if (!commercial_destination) {
+            // If the title contains clues, use them; otherwise default to Birou
+            if (hasCommercialKeywords(combinedTitle)) {
+              commercial_destination = detectCommercialDestination(combinedTitle);
+            } else {
+              commercial_destination = 'Birou';
+            }
+          }
+        }
+      }
+
       console.log(`  🏠 2) Tip proprietate: ${propertyType}`);
+      if (commercial_destination) {
+        console.log(`  🏬 2a) Destinație comercială: ${commercial_destination}`);
+      }
 
       // ── 3. Locație completă ─────────────────────────────────────
       // BUG FIX: Use .styles_map__title__UgISm as PRIMARY source for address
@@ -1109,6 +1197,7 @@ const scrap_999 = async (ctx, url) => {
       return {
         advertId,
         propertyType,
+        commercial_destination, // BUG FIX: Commercial sub-type for Strapi
         location,
         rooms,
         area,
@@ -1570,6 +1659,8 @@ const scrap_999 = async (ctx, url) => {
       formattedText,
 
       type: extracted.propertyType || 'Apartament',
+      // BUG FIX: Pass commercial_destination for Strapi commercial endpoint
+      commercial_destination: extracted.commercial_destination || null,
       link: fixedUrl,
       price: extracted.price || 'N/A',
       priceNumeric: priceNumeric || 0, // BUG #8: numeric price for filter URL
