@@ -86,7 +86,7 @@ function classifyError(error) {
  */
 async function tryModel(modelConfig, messages, options = {}) {
   const { expectJson = true, temperature = 0.1, maxTokens = 1000 } = options;
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKey = process.env['OpenRouter-API-Key'] || process.env.OPENROUTER_API_KEY;
 
   if (!apiKey) {
     const err = new Error('OpenRouter API key not configured');
