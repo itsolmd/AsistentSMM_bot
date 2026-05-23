@@ -1,0 +1,4 @@
+# Nixpacks configuration
+# Override default Node.js version (18 EOL → 22)
+[environments]
+NIXPACKS_NODE_VERSION = "22"
