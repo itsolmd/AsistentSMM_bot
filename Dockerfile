@@ -1,14 +1,32 @@
-# Dockerfile
-FROM node:20
+# Optimized Dockerfile with Chromium via apt (no Puppeteer download)
+FROM node:20-bookworm-slim
+
+# Install Chromium and dependencies for Puppeteer via apt (cached at OS layer)
+RUN apt-get update && apt-get install -y \
+  chromium \
+  chromium-sandbox \
+  libxshmfence-dev \
+  --no-install-recommends \
+  && rm -rf /var/lib/apt/lists/*
+
+# Set Puppeteer to skip its own Chromium download
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+  PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+  NPM_CONFIG_PREFER_OFFLINE=true
 
 # Install PM2 globally
 RUN npm install -g pm2
 
 WORKDIR /app
 
+# Copy only package files first (for layer caching)
 COPY package*.json ./
-RUN npm install
+COPY .puppeteerrc.cjs ./
 
+# npm ci with cache optimization — no audit/no fund for speed
+RUN npm ci --prefer-offline --no-audit --no-fund
+
+# Copy rest of the application
 COPY . .
 
 # Create log directory

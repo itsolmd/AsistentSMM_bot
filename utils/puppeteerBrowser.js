@@ -13,10 +13,22 @@ let browserInstance = null;
  */
 async function getBrowser() {
   if (!browserInstance) {
-    browserInstance = await puppeteer.launch({
+    const launchOptions = {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+    };
+
+    // Use system Chromium if available (Docker/Nixpacks deployment)
+    const fs = require('fs');
+    const systemChromium = '/usr/bin/chromium-browser';
+    const systemChromium2 = '/usr/bin/chromium';
+    if (fs.existsSync(systemChromium)) {
+      launchOptions.executablePath = systemChromium;
+    } else if (fs.existsSync(systemChromium2)) {
+      launchOptions.executablePath = systemChromium2;
+    }
+
+    browserInstance = await puppeteer.launch(launchOptions);
   }
   return browserInstance;
 }
