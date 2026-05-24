@@ -70,8 +70,22 @@ const scrap_999 = async (ctx, url) => {
     console.log("");
 
     // ── 2. Lansează browser ────────────────────────────────────
+    // Detectează executabilul Chrome/Chromium cross-platform:
+    //   - În Docker: /usr/bin/chromium-browser (installed via apt)
+    //   - Pe macOS: /Applications/Google Chrome.app/... (utilizator local)
+    //   - Fallback: lasă Puppeteer să decidă (dacă are bundled Chromium)
+    const fs = require('fs');
+    const possiblePaths = [
+      process.env.PUPPETEER_EXECUTABLE_PATH,   // variabila de mediu (Docker)
+      '/usr/bin/chromium-browser',              // cale Linux (Docker)
+      '/usr/bin/chromium',                      // cale Linux alternativă
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', // macOS
+    ];
+    const executablePath = possiblePaths.find(p => p && fs.existsSync(p)) || undefined;
+
     const browser = await puppeteer.launch({
       headless: true,
+      executablePath,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     const page = await browser.newPage();
