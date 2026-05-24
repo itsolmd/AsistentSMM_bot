@@ -1,24 +1,22 @@
 [phases.setup]
 aptMirror = "http://mirror.rackspace.com/ubuntu"
-
-[phases.setup.aptOptions]
-"--no-install-recommends" = true
-
-[phases.setup.aptPkgs]
-libnss3 = "libnss3"
-libatk1.0-0 = "libatk1.0-0"
-libatk-bridge2.0-0 = "libatk-bridge2.0-0"
-libcups2 = "libcups2"
-libgbm1 = "libgbm1"
-libasound2t64 = "libasound2t64"
-libpangocairo-1.0-0 = "libpangocairo-1.0-0"
-libxss1 = "libxss1"
-libgtk-3-0 = "libgtk-3-0"
-libxshmfence1 = "libxshmfence1"
-libglu1 = "libglu1"
-chromium = "chromium"
-curl = "curl"
-wget = "wget"
+aptOptions = { "--no-install-recommends": true }
+aptPkgs = [
+  "libnss3",
+  "libatk1.0-0",
+  "libatk-bridge2.0-0",
+  "libcups2",
+  "libgbm1",
+  "libasound2t64",
+  "libpangocairo-1.0-0",
+  "libxss1",
+  "libgtk-3-0",
+  "libxshmfence1",
+  "libglu1",
+  "chromium",
+  "curl",
+  "wget"
+]
 
 [start]
 cmd = "npm run start"
