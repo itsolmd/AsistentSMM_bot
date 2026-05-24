@@ -1,20 +1,39 @@
-# Nixpacks configuration — ACTIVE
-# The project uses Nixpacks for builds on Coolify.
-# Node.js version is explicitly set to 22 (LTS) to avoid EOL Node 18 default.
-
-[environments]
-NIXPACKS_NODE_VERSION = "22"
-PUPPETEER_SKIP_DOWNLOAD = "true"
-NPM_CONFIG_PREFER_OFFLINE = "true"
-NPM_CONFIG_CACHE = "/opt/npm-cache"
-
 [phases.setup]
-nixPkgs = ["chromium", "chromium-sandbox", "libxshmfence-dev", "nss", "nspr", "atk", "at-spi2-atk", "libdrm", "libxkbcommon", "libxcomposite", "libxdamage", "libxrandr", "libgbm", "libpango", "cairo", "libasound2"]
-
-[cache]
-package = "/opt/npm-cache"
-
-[phases.install]
-commands = [
-  "npm ci --prefer-offline --no-audit --no-fund"
+nixPkgs = [
+    "chromium",
+    "libxshmfence-dev",
+    "nss",
+    "nspr",
+    "atk",
+    "at-spi2-atk",
+    "libdrm",
+    "libxkbcommon",
+    "libxcomposite",
+    "libxdamage",
+    "libxrandr",
+    "libgbm",
+    "libpango",
+    "cairo",
+    "libasound2"
 ]
+
+[phases.setup.aptPkgs]
+packages = [
+    "libnss3",
+    "libatk1.0-0",
+    "libatk-bridge2.0-0",
+    "libcups2",
+    "libgbm1",
+    "libasound2t64",
+    "libpangocairo-1.0-0",
+    "libxss1",
+    "libgtk-3-0",
+    "libxshmfence1",
+    "libglu1",
+    "chromium",
+    "curl",
+    "wget"
+]
+
+[start]
+cmd = "npm run start"
