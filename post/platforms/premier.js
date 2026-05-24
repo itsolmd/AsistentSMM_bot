@@ -10,6 +10,7 @@ const { normalizeUrl, safeUrl, sanitizeText } = require("../../utils/telegramMed
 const { uploadImageToStrapi } = require("../../utils/uploadImagStrapi");
 const { geocodeWithFallback } = require('../../utils/geolocNominatim');      // Nominatim OSM geocoder
 const { processImagePipeline } = require("../../services/uploadManager");
+const { tgRetry } = require("../../utils/telegramRetry");
 // const { scrap_999, GeoLoc } = require("../../webscrape/websites/999");
 
 /**
@@ -935,20 +936,27 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
       }
     );
 
-    ctx.editMessageText("Postare finalizata!");
+    // ── Notify user with auto-retry on 429 rate limits ──
+    await tgRetry(() => ctx.editMessageText("Postare finalizata!"), 'editMessageText(Postare finalizata!)');
     if (
       backend ===
       "z0cs0ko4k0ow4ggkskkc40wc.62.169.31.87.sslip.io"
     ) {
-      ctx.reply(
-        `Postarea valabila la: https://premierimobil.md/en/${canonicalType}/` + postImobil.data.data.documentId
+      await tgRetry(
+        () => ctx.reply(
+          `Postarea valabila la: https://premierimobil.md/en/${canonicalType}/` + postImobil.data.data.documentId
+        ),
+        'ctx.reply(Premier link)'
       );
     } else if (
       backend ===
       "d88w4ccwoggkkgc8k0k0sook.62.169.31.87.sslip.io"
     ) {
-      ctx.reply(
-        `Postarea valabila la: https://imobil.parkit.md/en/${canonicalType}/` + postImobil.data.data.documentId
+      await tgRetry(
+        () => ctx.reply(
+          `Postarea valabila la: https://imobil.parkit.md/en/${canonicalType}/` + postImobil.data.data.documentId
+        ),
+        'ctx.reply(Parkit link)'
       );
     }
 

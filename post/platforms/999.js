@@ -5,6 +5,7 @@ const FormData = require("form-data"); // Ensure you use form-data in Node.js
 const { normalizeUrl, safeUrl } = require("../../utils/telegramMediaSafe");
 const { downloadSingleImage } = require("../../services/imageDownloader");
 const { parseWithFallback } = require("../../services/aiFallback");
+const { tgRetry } = require("../../utils/telegramRetry");
 
 // ═══════════════════════════════════════════════════════════════════
 // CATEGORIES — Fetched from https://partners-api.999.md/categories
@@ -239,9 +240,17 @@ async function extractRegion(ctx) {
   //   1. Premier format: ctx.session.data.sector = {ro: "Centru"}
   //   2. 999.md scraper: ctx.session.data.parsedLocation.sector = "Centru"
   //   3. Direct string:   ctx.session.data.sector = "Centru"
-  const sectorName = typeof ctx.session.data.sector === 'object' && ctx.session.data.sector !== null
+  let sectorName = typeof ctx.session.data.sector === 'object' && ctx.session.data.sector !== null
     ? ctx.session.data.sector.ro || ctx.session.data.sector.name
     : ctx.session.data.sector || ctx.session.data?.parsedLocation?.sector;
+
+  // BUG FIX v4.1: Fallback to region array (index 2) if parsedLocation.sector is null
+  // The region array from 999.md scraper format: [municipality, city, sector]
+  // Example: ["Chișinău mun.", "Locaţie", "Centru"] → sector = "Centru"
+  if (!sectorName && Array.isArray(ctx.session.data?.region) && ctx.session.data.region.length >= 3) {
+    sectorName = ctx.session.data.region[2];
+    console.log(`[extractRegion] ✅ Sector extracted from region array: "${sectorName}"`);
+  }
 
   const suburbName = typeof ctx.session.data.suburb === 'object' && ctx.session.data.suburb !== null
     ? ctx.session.data.suburb.ro || ctx.session.data.suburb.name
@@ -2245,7 +2254,7 @@ const postTo999 = async (ctx) => {
     );
 
     console.log("✅ [999.md] Postare reușită! ID:", post.data.advert.id);
-    ctx.reply("✅ Postarea valabila la: https://999.md/ro/" + post.data.advert.id);
+    await tgRetry(() => ctx.reply("✅ Postarea valabila la: https://999.md/ro/" + post.data.advert.id), 'ctx.reply(999.md link)');
     return post.data.advert.id;
   } catch (postError) {
     // ── Error handling: log full API response body for debugging ──

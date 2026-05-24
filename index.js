@@ -11,6 +11,7 @@ const sharp = require("sharp");
 const { postToPremier } = require("./post/platforms/premier");
 const { parseLoyal } = require('./webscrape/websites/loyal');
 const { normalizeUrl, safeUrl } = require("./utils/telegramMediaSafe");
+const { tgRetry } = require("./utils/telegramRetry");
 
 // ── AI ENHANCED MODULES ───────────────────────────────────
 const { getDashboardKeyboard, handleDashboardAction, handleRepost, markAsPosted, isAlreadyPosted, isAutoPostEnabled } = require("./bot/dashboard");
@@ -335,7 +336,7 @@ async function restoreSessionDataFromMongo(ctx, db) {
 // Handle Yes/No response for watermark removal
 bot.action("remove_watermark_yes", checkUser, async (ctx) => {
   try {
-    ctx.editMessageText("Postare in executie dureza pana la 5 sec....");
+    await tgRetry(() => ctx.editMessageText("Postare in executie dureza pana la 5 sec...."), 'editMessageText(watermark_yes)');
 
     // ── DIAGNOSTIC: Log session data state before posting ──
     console.log('[remove_watermark_yes] session keys:', Object.keys(ctx.session));
@@ -375,7 +376,7 @@ bot.action("remove_watermark_yes", checkUser, async (ctx) => {
 
 bot.action("remove_watermark_no", checkUser, async (ctx) => {
   try {
-    ctx.editMessageText("Se incarca imaginile pe Premierimobil.md va dura pana la 5-6 sec...");
+    await tgRetry(() => ctx.editMessageText("Se incarca imaginile pe Premierimobil.md va dura pana la 5-6 sec..."), 'editMessageText(watermark_no)');
 
     // ── DIAGNOSTIC: Log session data state before posting ──
     console.log('[remove_watermark_no] session keys:', Object.keys(ctx.session));
