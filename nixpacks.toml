@@ -14,7 +14,7 @@ nixPkgs = [
     "libgbm",
     "libpango",
     "cairo",
-    "libasound2"
+    "libasound"
 ]
 aptPkgs = [
     "libnss3",
