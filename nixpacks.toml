@@ -1,25 +1,20 @@
-# Nixpacks configuration — DISABLED
-# The project uses a custom Dockerfile for builds.
-# To use nixpacks instead, uncomment the sections below and configure
-# Coolify to use "nixpacks" as the Build Pack.
-#
-# NOTE: If nixpacks is used, ensure the Coolify deployment server has
-# adequate resources (CPU/RAM) and network bandwidth to download the
-# nixpkgs archive (~150MB) during the nix-env installation step.
-#
-# [environments]
-# NIXPACKS_NODE_VERSION = "22"
-# PUPPETEER_SKIP_DOWNLOAD = "true"
-# NPM_CONFIG_PREFER_OFFLINE = "true"
-# NPM_CONFIG_CACHE = "/opt/npm-cache"
-#
-# [phases.setup]
-# nixPkgs = ["chromium", "chromium-sandbox", "libxshmfence-dev", "nss", "nspr", "atk", "at-spi2-atk", "libdrm", "libxkbcommon", "libxcomposite", "libxdamage", "libxrandr", "libgbm", "libpango", "cairo", "libasound2"]
-#
-# [cache]
-# package = "/opt/npm-cache"
-#
-# [phases.install]
-# commands = [
-#   "npm ci --prefer-offline --no-audit --no-fund"
-# ]
+# Nixpacks configuration — ACTIVE
+# The project uses Nixpacks for builds on Coolify.
+# Node.js version is explicitly set to 22 (LTS) to avoid EOL Node 18 default.
+
+[environments]
+NIXPACKS_NODE_VERSION = "22"
+PUPPETEER_SKIP_DOWNLOAD = "true"
+NPM_CONFIG_PREFER_OFFLINE = "true"
+NPM_CONFIG_CACHE = "/opt/npm-cache"
+
+[phases.setup]
+nixPkgs = ["chromium", "chromium-sandbox", "libxshmfence-dev", "nss", "nspr", "atk", "at-spi2-atk", "libdrm", "libxkbcommon", "libxcomposite", "libxdamage", "libxrandr", "libgbm", "libpango", "cairo", "libasound2"]
+
+[cache]
+package = "/opt/npm-cache"
+
+[phases.install]
+commands = [
+  "npm ci --prefer-offline --no-audit --no-fund"
+]
