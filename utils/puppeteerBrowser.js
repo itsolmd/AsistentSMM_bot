@@ -14,18 +14,24 @@ let browserInstance = null;
 async function getBrowser() {
   if (!browserInstance) {
     const launchOptions = {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+      ],
     };
 
-    // Use system Chromium if available (Docker/Nixpacks deployment)
+    // Use PUPPETEER_EXECUTABLE_PATH env var first, then fallback to system paths
     const fs = require('fs');
-    const systemChromium = '/usr/bin/chromium-browser';
-    const systemChromium2 = '/usr/bin/chromium';
-    if (fs.existsSync(systemChromium)) {
-      launchOptions.executablePath = systemChromium;
-    } else if (fs.existsSync(systemChromium2)) {
-      launchOptions.executablePath = systemChromium2;
+    const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    const systemPaths = ['/usr/bin/chromium-browser', '/usr/bin/chromium'];
+    const executablePath = envPath || systemPaths.find(p => fs.existsSync(p));
+    if (executablePath) {
+      launchOptions.executablePath = executablePath;
     }
 
     browserInstance = await puppeteer.launch(launchOptions);

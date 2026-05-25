@@ -71,22 +71,29 @@ const scrap_999 = async (ctx, url) => {
 
     // ── 2. Lansează browser ────────────────────────────────────
     // Detectează executabilul Chrome/Chromium cross-platform:
-    //   - În Docker: /usr/bin/chromium-browser (installed via apt)
-    //   - Pe macOS: /Applications/Google Chrome.app/... (utilizator local)
+    //   - Docker: PUPPETEER_EXECUTABLE_PATH env var → /usr/bin/chromium
+    //   - macOS: /Applications/Google Chrome.app/... (utilizator local)
     //   - Fallback: lasă Puppeteer să decidă (dacă are bundled Chromium)
     const fs = require('fs');
+    const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
     const possiblePaths = [
-      process.env.PUPPETEER_EXECUTABLE_PATH,   // variabila de mediu (Docker)
       '/usr/bin/chromium-browser',              // cale Linux (Docker)
       '/usr/bin/chromium',                      // cale Linux alternativă
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', // macOS
     ];
-    const executablePath = possiblePaths.find(p => p && fs.existsSync(p)) || undefined;
+    const executablePath = envPath || possiblePaths.find(p => fs.existsSync(p)) || undefined;
 
     const browser = await puppeteer.launch({
-      headless: true,
+      headless: 'new',
       executablePath,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+      ],
     });
     const page = await browser.newPage();
     await page.goto(fixedUrl, { waitUntil: 'networkidle2' });
