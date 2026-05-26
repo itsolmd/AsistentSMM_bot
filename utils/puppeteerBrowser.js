@@ -25,10 +25,10 @@ async function getBrowser() {
       ],
     };
 
-    // Use PUPPETEER_EXECUTABLE_PATH env var first, then fallback to system paths
+    // Use PUPPETEER_EXECUTABLE_PATH env var first, then fallback to apt-installed chromium
     const fs = require('fs');
     const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    const systemPaths = ['/usr/bin/chromium-browser', '/usr/bin/chromium'];
+    const systemPaths = ['/usr/bin/chromium'];
     const executablePath = envPath || systemPaths.find(p => fs.existsSync(p));
     if (executablePath) {
       launchOptions.executablePath = executablePath;

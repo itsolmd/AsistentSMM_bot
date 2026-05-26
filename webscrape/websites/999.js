@@ -76,12 +76,11 @@ const scrap_999 = async (ctx, url) => {
     //   - Fallback: lasă Puppeteer să decidă (dacă are bundled Chromium)
     const fs = require('fs');
     const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    const possiblePaths = [
-      '/usr/bin/chromium-browser',              // cale Linux (Docker)
-      '/usr/bin/chromium',                      // cale Linux alternativă
+    const systemPaths = [
+      '/usr/bin/chromium',                      // cale Linux (Docker) — DO NOT add chromium-browser (snap shim)
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', // macOS
     ];
-    const executablePath = envPath || possiblePaths.find(p => fs.existsSync(p)) || undefined;
+    const executablePath = envPath || systemPaths.find(p => fs.existsSync(p)) || undefined;
 
     const browser = await puppeteer.launch({
       headless: 'new',

@@ -590,13 +590,13 @@ const getLocationArray = async (str, ctx) => {
   } catch (axiosErr) {
     console.error("❌ [getLocationArray] Axios error fetching sectors:", axiosErr.message);
     // Non-critical: return fields without sector
-    fields.push({ id: "7", value: municipiiID });
+    fields.push({ id: "7", value: raionID });
     return fields;
   }
 
   if (!Array.isArray(resSector?.data?.Options)) {
     console.error(`❌ [getLocationArray] Lista de sectoare pentru orașul "${city}" nu este validă!`);
-    fields.push({ id: "7", value: municipiiID });
+    fields.push({ id: "7", value: raionID });
     return fields;
   }
 
@@ -619,12 +619,12 @@ const getLocationArray = async (str, ctx) => {
     console.log("⚠️ [getLocationArray] Sectorul nu a fost găsit. Opțiuni disponibile:");
     resSector.data.Options.forEach(opt => console.log(`  - ${opt.title}`));
     // Non-critical: return fields without sector rather than crash
-    fields.push({ id: "7", value: municipiiID });
+    fields.push({ id: "7", value: raionID });
     return fields;
   }
 
   const sectorID = sectorOption.id;
-  fields.push({ id: "7", value: municipiiID });
+  fields.push({ id: "7", value: raionID });
   fields.push({ id: "10", value: sectorID });
 
   return fields;
