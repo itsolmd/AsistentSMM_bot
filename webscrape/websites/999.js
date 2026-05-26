@@ -74,17 +74,48 @@ const scrap_999 = async (ctx, url) => {
     //   - Docker: PUPPETEER_EXECUTABLE_PATH env var → /usr/bin/chromium
     //   - macOS: /Applications/Google Chrome.app/... (utilizator local)
     //   - Fallback: lasă Puppeteer să decidă (dacă are bundled Chromium)
+    //
+    // Note: On Debian Bookworm (node:20-slim), chromium is at /usr/bin/chromium.
+    // Some variants install to /usr/bin/chromium-browser instead.
     const fs = require('fs');
+    const { execSync } = require('child_process');
     const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+
+    // Expanded search paths for Chromium
     const systemPaths = [
-      '/usr/bin/chromium',                      // cale Linux (Docker) — DO NOT add chromium-browser (snap shim)
+      '/usr/bin/chromium',                      // Debian/Ubuntu (apt) — primary
+      '/usr/bin/chromium-browser',              // Some Debian variants
+      '/snap/bin/chromium',                     // Snap installations
+      '/usr/local/bin/chromium',                // Manual installations
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', // macOS
     ];
-    const executablePath = envPath || systemPaths.find(p => fs.existsSync(p)) || undefined;
+
+    // Auto-detect: env var → known paths → `which` command → undefined (Puppeteer default)
+    let executablePath;
+    if (envPath && fs.existsSync(envPath)) {
+      executablePath = envPath;
+      console.log(`[SCRAPE_999] ✓ Using Chromium from ENV: ${envPath}`);
+    } else {
+      executablePath = systemPaths.find(p => fs.existsSync(p));
+      if (executablePath) {
+        console.log(`[SCRAPE_999] ✓ Using Chromium at: ${executablePath}`);
+      } else {
+        // Try `which` as last resort
+        try {
+          const whichResult = execSync('which chromium 2>/dev/null || which chromium-browser 2>/dev/null', { encoding: 'utf-8' }).trim();
+          if (whichResult && fs.existsSync(whichResult)) {
+            executablePath = whichResult;
+            console.log(`[SCRAPE_999] ✓ Using Chromium from \`which\`: ${whichResult}`);
+          }
+        } catch (e) {
+          // which failed
+        }
+      }
+    }
 
     const browser = await puppeteer.launch({
       headless: 'new',
-      executablePath,
+      executablePath: executablePath || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
