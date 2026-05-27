@@ -39,6 +39,8 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     libxss1 \
     xdg-utils \
+    wget \
+    curl \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && echo "=== Attempt 1: Installing chromium from main repo ==="
@@ -110,8 +112,10 @@ RUN mkdir -p logs
 # ────────────────────────────────────────────────────────────────
 # STEP 6: Healthcheck
 # ────────────────────────────────────────────────────────────────
+# Using curl (installed above) instead of wget to avoid "wget: not found" errors
+# HEALTH_PORT is set in .env or defaults to 8080 in healthcheck.js
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+  CMD curl -f http://localhost:8080/health || exit 1
 
 # Expose healthcheck port
 EXPOSE 8080

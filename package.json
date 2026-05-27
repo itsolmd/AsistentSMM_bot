@@ -20,6 +20,7 @@
     "axios": "^1.10.0",
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.7",
+    "express": "^5.2.1",
     "form-data": "^4.0.5",
     "hercai": "^12.4.0",
     "mongodb": "^6.18.0",

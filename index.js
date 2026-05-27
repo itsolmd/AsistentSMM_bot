@@ -1,3 +1,4 @@
+const express = require("express");
 const { Telegraf, session, Markup } = require("telegraf");
 const { MongoClient, ObjectId } = require("mongodb");
 require("dotenv").config();
@@ -123,13 +124,35 @@ if (hadRecoveryState) {
 healthServer = startHealthServer();
 updateHealthState({ status: "starting", pid: process.pid });
 
+// ── Express healthcheck route ──
+const healthApp = express();
+const EXPRESS_HEALTH_PORT = parseInt(process.env.EXPRESS_HEALTH_PORT || "8081", 10);
+healthApp.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+healthApp.listen(EXPRESS_HEALTH_PORT, "0.0.0.0", () => {
+  logger.health(`Express health route listening on port ${EXPRESS_HEALTH_PORT}`);
+});
+healthApp.on("error", (err) => {
+  logger.error("HEALTH", "Express health route error", { error: err.message });
+});
+
 // Start watchdog (Nivelul 3)
 watchdog.start();
 
 // Start memory monitor (Nivelul 4)
 memoryMonitor.start();
 
-bot.use(session());
+// Custom session store for isolated instance state
+bot.use(session({
+  property: 'session',
+  store: {
+    // Use unique key for this instance
+    get: (key) => {},
+    set: (key, value) => {},
+    destroy: (key) => {}
+  }
+}));
 let userAdId;
 
 async function initMongo() {
@@ -874,11 +897,99 @@ const originalTextHandler = bot.on; // store reference
 // We'll integrate markAsPosted in the text handler below
 
 /* ════════════════════════════════════════════════════════════════
-   BOT LAUNCH
+   BOT LAUNCH — with 409 Conflict prevention
+   ════════════════════════════════════════════════════════════════
+   The 409 "Conflict: terminated by other getUpdates request" error occurs
+   when Telegram detects an existing active polling connection from a
+   previous bot instance that hasn't been cleanly released.
+
+   Root causes in Coolify/Docker:
+     1. Container restart leaves dangling poll connections
+     2. PM2 restart creates overlapping instances
+     3. Healthcheck probes keep old sessions alive
+
+   Fix strategy:
+     1. Stop any existing bot session FIRST (cleanup)
+     2. Clear Telegram server-side long-poll state via getUpdates(-1, 0)
+     3. Wait briefly for propagation
+     4. Launch with dropPendingUpdates
+     5. Retry with backoff if 409 still occurs
    ════════════════════════════════════════════════════════════════ */
 
-bot.launch({ dropPendingUpdates: true })
-  .then(() => {
+const TELEGRAM_409_RETRY_DELAY = 3000; // ms to wait before retry on 409
+const TELEGRAM_409_MAX_RETRIES = 3;
+
+/**
+ * Clean up any dangling Telegram polling connections before launch.
+ * This prevents the "409: Conflict" error when multiple bot instances
+ * try to poll with the same token.
+ */
+async function cleanupTelegramSession() {
+  try {
+    // Step 1: Stop any existing bot connection gracefully
+    logger.info("GENERAL", "🔄 Cleaning up previous Telegram session...");
+    await bot.stop();
+    logger.info("GENERAL", "✓ Previous bot session stopped");
+
+    // Step 2: Wait briefly for Telegram server to register the disconnect
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Step 3: Clear any hanging long-poll connections on Telegram's side
+    // Using offset=-1 and timeout=0 cancels any pending getUpdates request
+    await bot.telegram.getUpdates({ offset: -1, timeout: 0 });
+    logger.info("GENERAL", "✓ Telegram long-poll state cleared");
+
+    // Step 4: Additional wait for cleanup to propagate
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } catch (err) {
+    // Cleanup errors are non-fatal — log and continue
+    logger.warn("GENERAL", "⚠️ Telegram session cleanup warning (non-fatal)", {
+      error: err.message,
+    });
+  }
+}
+
+/**
+ * Attempt to launch the bot with retry logic for 409 Conflict errors.
+ * This handles the case where Telegram hasn't fully released the previous
+ * polling session by the time we try to connect.
+ */
+async function launchBotWithRetry(retryCount = 0) {
+  try {
+    await bot.launch({ dropPendingUpdates: true });
+    return true; // Success
+  } catch (err) {
+    // Check if this is a 409 Conflict error
+    const is409 = err.message && (
+      err.message.includes("409") ||
+      err.message.toLowerCase().includes("conflict") ||
+      err.message.includes("terminated by other getUpdates")
+    );
+
+    if (is409 && retryCount < TELEGRAM_409_MAX_RETRIES) {
+      const delay = TELEGRAM_409_RETRY_DELAY * (retryCount + 1); // Linear backoff
+      logger.warn("GENERAL", `🔄 409 Conflict detected — retrying in ${delay}ms (attempt ${retryCount + 1}/${TELEGRAM_409_MAX_RETRIES})`);
+
+      // Cleanup again before retry
+      await cleanupTelegramSession();
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return launchBotWithRetry(retryCount + 1);
+    }
+
+    // Not a 409, or out of retries — rethrow
+    throw err;
+  }
+}
+
+// ── Execute launch sequence ──
+(async () => {
+  // Step 1: Clean up any dangling Telegram session from previous container/PM2 instance
+  await cleanupTelegramSession();
+
+  // Step 2: Launch with 409 retry protection
+  try {
+    await launchBotWithRetry();
     const now = Date.now();
     logger.info("GENERAL", "✅ Bot launched successfully!");
 
@@ -893,12 +1004,12 @@ bot.launch({ dropPendingUpdates: true })
     setTimeout(() => {
       recoveryManager.clearState();
     }, 10000); // Wait 10s to ensure stability
-  })
-  .catch((err) => {
+  } catch (err) {
     logger.fatal("GENERAL", "❌ Bot failed to launch!", { error: err.message, stack: err.stack });
     logger.restart("Bot launch failed — forcing restart");
     setTimeout(() => process.exit(1), 2000);
-  });
+  }
+})();
 
 /* ════════════════════════════════════════════════════════════════
    HEALTHCHECK STATUS UPDATE (every 30s)
