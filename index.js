@@ -143,14 +143,25 @@ watchdog.start();
 // Start memory monitor (Nivelul 4)
 memoryMonitor.start();
 
-// Custom session store for isolated instance state
+// ── In-memory session store ─────────────────────────────────
+// Using a Map to persist session data across requests.
+// Without this, every button click starts with an empty session,
+// making multi-select (checkboxes) behave like single-select (radio buttons).
+const sessionStore = new Map();
+
 bot.use(session({
   property: 'session',
   store: {
-    // Use unique key for this instance
-    get: (key) => {},
-    set: (key, value) => {},
-    destroy: (key) => {}
+    get: (key) => {
+      const data = sessionStore.get(key);
+      return data || undefined; // undefined = Telegraf creates a fresh session
+    },
+    set: (key, value) => {
+      sessionStore.set(key, value);
+    },
+    destroy: (key) => {
+      sessionStore.delete(key);
+    }
   }
 }));
 let userAdId;
@@ -208,6 +219,7 @@ bot.hears("Adauga o postare", async (ctx) => {
 bot.on("text", checkUser, async (ctx) => {
   try {
     watchdog.recordActivity();
+
     const verificationMessage = await ctx.reply("Ma duc pana pe 999.md, sa va aduc anuntul!! 😃 in cateva sec.");
     if (!ctx.session) ctx.session = {};
     userAdId =
@@ -467,71 +479,137 @@ bot.action("post_platforms", checkUser, async (ctx) => {
 });
 
 bot.action(/^select_agent_(.*)$/, checkUser, async (ctx) => {
-  const agentId = ctx.match[1];
-  const agent = await db
-    .collection("users")
-    .findOne({ _id: new ObjectId(agentId) });
-  if (!agent) return ctx.reply("Agentul nu a fost gasit.");
+  try {
+    const agentId = ctx.match[1];
+    const agent = await db
+      .collection("users")
+      .findOne({ _id: new ObjectId(agentId) });
+    if (!agent) {
+      await ctx.answerCbQuery().catch(() => {});
+      return ctx.reply("Agentul nu a fost gasit.");
+    }
 
-  ctx.session.selectedAgent = agent;
-  ctx.session.selectedPlatforms = [];
+    ctx.session.selectedAgent = agent;
+    ctx.session.selectedPlatforms = [];
 
-  const platformButtons = [
-    { name: "FB/Inst", value: "meta" },
-    { name: "999.md", value: "999" },
-    { name: "Premier", value: "premier" },
-  ].map((platform) =>
-    Markup.button.callback(
-      `${
-        ctx.session.selectedPlatforms.includes(platform.value) ? "✅" : "➕"
-      } ${platform.name}`,
-      `select_platform_${platform.value}`
-    )
-  );
+    // Build interactive toggle buttons — multi-select pattern
+    const platformButtons = [
+      { name: "FB/Inst", value: "meta" },
+      { name: "999.md", value: "999" },
+      { name: "Premier", value: "premier" },
+    ].map((platform) =>
+      Markup.button.callback(
+        `➕ ${platform.name}`,
+        `select_platform_${platform.value}`
+      )
+    );
 
-  const buttonRows = [];
-  for (let i = 0; i < platformButtons.length; i += 2)
-    buttonRows.push(platformButtons.slice(i, i + 2));
-  buttonRows.push([Markup.button.callback("Confirmare", "confirm_platforms")]);
+    const buttonRows = [];
+    for (let i = 0; i < platformButtons.length; i += 2)
+      buttonRows.push(platformButtons.slice(i, i + 2));
+    buttonRows.push([Markup.button.callback("✅ Confirmare", "confirm_platforms")]);
 
-  await ctx.editMessageText(
-    "Alege-ti platformele pentru publicare:",
-    Markup.inlineKeyboard(buttonRows)
-  );
+    // Acknowledge callback immediately BEFORE editing the message
+    // to prevent keyboard disappearance if editMessageText fails
+    await ctx.answerCbQuery().catch(() => {});
+
+    await ctx.editMessageText(
+      '📱 *Selectează platformele pentru publicare:*\n\n' +
+      'Atinge butoanele pentru a activa/dezactiva platformele.\n' +
+      'Apasă "✅ Confirmare" când ai terminat.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(buttonRows),
+      }
+    );
+  } catch (error) {
+    console.error('❌ [select_agent] Error:', error.message);
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+    } catch (_) {}
+    try {
+      await ctx.reply('A apărut o eroare la selectarea agentului. Încercați din nou.');
+    } catch (_) {}
+  }
 });
 
 bot.action(/^select_platform_(.*)$/, checkUser, async (ctx) => {
-  const platform = ctx.match[1];
-  // CRASH-PROOF: Initialize if undefined (session expiry or race condition)
-  ctx.session.selectedPlatforms = ctx.session.selectedPlatforms || [];
-  ctx.session.selectedPlatforms = ctx.session.selectedPlatforms.includes(
-    platform
-  )
-    ? ctx.session.selectedPlatforms.filter((p) => p !== platform)
-    : [...ctx.session.selectedPlatforms, platform];
+  try {
+    const platform = ctx.match[1];
 
-  const platformButtons = [
-    { name: "FB/Inst", value: "meta" },
-    { name: "999.md", value: "999" },
-    { name: "Premier", value: "premier" },
-  ].map((platform) =>
-    Markup.button.callback(
-      `${
-        ctx.session.selectedPlatforms.includes(platform.value) ? "✅" : "➕"
-      } ${platform.name}`,
-      `select_platform_${platform.value}`
-    )
-  );
+    // ── ACKNOWLEDGE CALLBACK FIRST ───────────────────────────────────
+    // CRITICAL: Answer the callback query BEFORE editing the message.
+    // If editMessageReplyMarkup fails, the callback is already answered
+    // and Telegram will NOT remove the inline keyboard.
+    // Without this, an error would leave the callback unanswered → keyboard disappears.
+    await ctx.answerCbQuery().catch(() => {});
 
-  const buttonRows = [];
-  for (let i = 0; i < platformButtons.length; i += 2)
-    buttonRows.push(platformButtons.slice(i, i + 2));
-  buttonRows.push([Markup.button.callback("Confirmare", "confirm_platforms")]);
+    // ── SESSION: toggle platform in selectedPlatforms array ───────────
+    // CRASH-PROOF: Initialize if undefined (session expiry or race condition)
+    ctx.session.selectedPlatforms = ctx.session.selectedPlatforms || [];
+    if (ctx.session.selectedPlatforms.includes(platform)) {
+      // Toggle OFF: remove from array
+      ctx.session.selectedPlatforms = ctx.session.selectedPlatforms.filter(
+        (p) => p !== platform
+      );
+    } else {
+      // Toggle ON: add to array (multi-select — keeps existing selections)
+      ctx.session.selectedPlatforms = [
+        ...ctx.session.selectedPlatforms,
+        platform,
+      ];
+    }
 
-  await ctx.editMessageText(
-    "Alege-ti platformele pentru publicare:",
-    Markup.inlineKeyboard(buttonRows)
-  );
+    console.log(
+      `[select_platform] Selected platforms:`,
+      ctx.session.selectedPlatforms
+    );
+
+    // ── BUILD updated buttons with checkmarks ─────────────────────────
+    const platformButtons = [
+      { name: "FB/Inst", value: "meta" },
+      { name: "999.md", value: "999" },
+      { name: "Premier", value: "premier" },
+    ].map((p) =>
+      Markup.button.callback(
+        `${
+          ctx.session.selectedPlatforms.includes(p.value) ? "✅" : "➕"
+        } ${p.name}`,
+        `select_platform_${p.value}`
+      )
+    );
+
+    const buttonRows = [];
+    for (let i = 0; i < platformButtons.length; i += 2)
+      buttonRows.push(platformButtons.slice(i, i + 2));
+    buttonRows.push([
+      Markup.button.callback("✅ Confirmare", "confirm_platforms"),
+    ]);
+
+    // ── UPDATE ONLY THE KEYBOARD (not the text) ──────────────────────
+    // CRITICAL: Use editMessageReplyMarkup instead of editMessageText
+    // to avoid Telegram "message is not modified" errors when the text
+    // hasn't changed. The keyboard (reply_markup) is always different
+    // because buttons change between ➕ and ✅ based on selection state.
+    // This ensures the callback succeeds even on rapid multi-clicks,
+    // and the session changes are ALWAYS persisted by Telegraf.
+    // ⚠️ Do NOT wrap in { reply_markup: ... } — Telegraf already adds it.
+    await ctx.editMessageReplyMarkup({
+      inline_keyboard: buttonRows,
+    });
+  } catch (error) {
+    // CRITICAL: Error is caught so Telegraf's session middleware
+    // ALWAYS persists the updated selectedPlatforms array.
+    // Without this try-catch, an unhandled rejection would prevent
+    // session.set() from being called, losing the toggle state.
+    console.error("❌ [select_platform] Error:", error.message);
+
+    // Fallback: ensure callback is answered even on error
+    // to prevent Telegram from removing the inline keyboard.
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+    } catch (_) {}
+  }
 });
 
 bot.action("confirm_platforms", checkUser, async (ctx) => {
@@ -539,22 +617,32 @@ bot.action("confirm_platforms", checkUser, async (ctx) => {
     watchdog.recordActivity();
     const selected = ctx.session.selectedPlatforms || [];
     if (selected.length === 0) {
+      await ctx.answerCbQuery().catch(() => {});
       return ctx.editMessageText("Nicio platformă selectată. Alegeți cel puțin una.");
     }
 
-    logger.info("GENERAL", "Platforms selected, asking about watermark", { platforms: selected });
+    logger.info("GENERAL", "Platforms confirmed, asking about watermark", { platforms: selected });
+
+    // Acknowledge callback query BEFORE editing the message
+    await ctx.answerCbQuery().catch(() => {});
 
     // Ask about watermark removal BEFORE posting
     await ctx.editMessageText(
-      "Scoatem watermarkul de pe toate pozele?",
-      Markup.inlineKeyboard([
-        Markup.button.callback("Da", "watermark_yes_post"),
-        Markup.button.callback("Nu", "watermark_no_post"),
-      ])
+      `🌐 *Platforme selectate:* ${selected.join(', ')}\n\nScoatem watermarkul de pe toate pozele?`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          Markup.button.callback("Da", "watermark_yes_post"),
+          Markup.button.callback("Nu", "watermark_no_post"),
+        ]),
+      }
     );
   } catch (error) {
     watchdog.recordError();
     logger.error("GENERAL", "Error in confirm_platforms", { error: error.message });
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+    } catch (_) {}
     ctx.reply("A avut loc o eroare la pregătirea publicării.");
   }
 });
