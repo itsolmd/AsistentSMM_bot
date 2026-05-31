@@ -663,30 +663,13 @@ const linkRouter = async (ctx, userAdId, db) => {
     if (["999.md", "m.999.md"].includes(host)) {
       const url = ctx.message.text.trim();
 
-      // Trimitem mesaj inițial + notificăm utilizatorul de status
-      await replyWithTimeout(ctx, `🔍 Se încearcă extragerea datelor...`, {}, 10000);
-
       try {
         const adData = await extractWithRetry(url, {
           maxAttempts: 5,
           delayMs: 3000,
           useAI: true,
           ctx, // Transmite ctx pentru scrapere care au nevoie de session (phoneNr etc.)
-          onAttempt: async (attempt, maxAttempts) => {
-            await replyWithTimeout(
-              ctx,
-              `⏳ Încercare ${attempt}/${maxAttempts}...`,
-              {},
-              10000
-            );
-          },
         });
-
-        // ✅ Extragere reușită
-        if (adData?._aiExtracted) {
-          await replyWithTimeout(ctx, `🤖 Datele s-au extras prin AI.`, {}, 10000);
-        }
-        await replyWithTimeout(ctx, `✅ Extragere reușită!`, {}, 10000);
 
         return returnInfoInChat(adData, ctx, userAdId, db);
       } catch (retryErr) {
