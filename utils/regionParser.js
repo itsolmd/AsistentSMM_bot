@@ -66,6 +66,21 @@ const KNOWN_SECTORS = new Set([
 const MUNICIPALITY_KEYWORDS = ['mun.', 'municipiu', 'municipiul'];
 
 /* =================================================================
+ * PLACEHOLDER WORDS — strings that should NEVER be treated as a real
+ * city/location name. These are generic Romanian labels like
+ * "Locaţie" (Location) that 999.md sometimes displays when the
+ * seller didn't specify an address.
+ * ================================================================= */
+const PLACEHOLDER_WORDS = new Set([
+  'locaţie', 'locatie',         // Location (placeholder)
+  'localitate',                  // Locality
+  'adresă', 'adresa',           // Address
+  'nedefinit', 'nedefinită',    // Undefined
+  'n/a', 'na', 'n.a.',          // Not available
+  '-',                          // Dash placeholder
+]);
+
+/* =================================================================
  * STREET PREFIXES
  * ================================================================= */
 const STREET_PREFIXES = ['str.', 'strada', 'bd.', 'bulevardul', 'bulevard',
@@ -98,6 +113,17 @@ const MD_PHONE_REGEX = /(?:\+?373|0)\s*\d[\d\s]{6,}/;
 function isKnownSector(token) {
   if (!token || typeof token !== 'string') return false;
   return KNOWN_SECTORS.has(token.toLowerCase().trim());
+}
+
+/* =================================================================
+ * 2a. isPlaceholderWord(token)
+ * -----------------------------------------------------------------
+ * Checks if a token is a known placeholder/label word that should
+ * never be treated as a real city or location name.
+ * ================================================================= */
+function isPlaceholderWord(token) {
+  if (!token || typeof token !== 'string') return false;
+  return PLACEHOLDER_WORDS.has(token.toLowerCase().trim());
 }
 
 /* =================================================================
@@ -240,7 +266,7 @@ function parseLocation(locationStr) {
   if (!result.city) {
     const cityFallback = parts.find(p => {
       const lower = p.toLowerCase().trim();
-      return !isKnownSector(p) && !isMunicipality(p) && !isStreet(p) && !STREET_NUMBER_REGEX.test(p);
+      return !isKnownSector(p) && !isMunicipality(p) && !isStreet(p) && !isPlaceholderWord(p) && !STREET_NUMBER_REGEX.test(p);
     });
     if (cityFallback) result.city = cityFallback;
   }
@@ -404,5 +430,7 @@ module.exports = {
   isKnownSector,
   isMunicipality,
   isStreet,
+  isPlaceholderWord,
   KNOWN_SECTORS,
+  PLACEHOLDER_WORDS,
 };

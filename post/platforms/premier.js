@@ -240,6 +240,94 @@ const hardcodedBuilding = (building) => {
 //   return uploadResponse.data[0].id;
 // }
 
+/**
+ * convertPenthouseForPremier(data)
+ *
+ * Convertește anunțurile de tip Penthouse pentru compatibilitate
+ * cu PremierImobil.md, care NU are câmpul "Penthouse" în sistem.
+ *
+ * REGULI DE CONVERSIE (doar pentru PremierImobil):
+ * 1. Dacă `data.type` este "Penthouse" → se schimbă în "Apartament"
+ * 2. Dacă `data.title` conține "penthouse" (case-insensitive) →
+ *    se înlocuiește cu "Apartament"
+ * 3. Câmpul "Etaj": se păstrează etajul real dacă există;
+ *    dacă etajul lipsește, iar total etaje există, se pune
+ *    etajul maxim (penthouse = ultimul etaj)
+ * 4. Dacă etajul lipsește complet din anunțul sursă,
+ *    se lasă gol (nu se inventează date)
+ *
+ * IMPORTANT: Conversia se aplică DOAR la postarea pe PremierImobil.md.
+ * Pe 999.md, Facebook, Instagram — rămâne "Penthouse" neschimbat.
+ *
+ * @param {Object} data - Datele scrapuite ale anunțului
+ * @returns {Object} Datele modificate pentru PremierImobil
+ */
+function convertPenthouseForPremier(data) {
+  if (!data || typeof data !== 'object') return data;
+
+  // Detectează Penthouse: verifică tipul SAU titlul (case-insensitive)
+  const typeIsPenthouse =
+    typeof data.type === 'string' && data.type.toLowerCase() === 'penthouse';
+  const titleContainsPenthouse =
+    typeof data.title === 'string' && /penthouse/i.test(data.title);
+
+  if (!typeIsPenthouse && !titleContainsPenthouse) {
+    return data; // Nu e Penthouse — nicio conversie
+  }
+
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log('🏢 [PENTHOUSE CONVERSION] Penthouse detectat — conversie pentru PremierImobil');
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log(`  📥 Tip raw:       "${data.type}"`);
+  console.log(`  📥 Titlu raw:     "${data.title}"`);
+  console.log(`  📥 Etaj raw:      "${data.floor}"`);
+  console.log(`  📥 Total etaje:   "${data.floors}"`);
+
+  // ── 1. Tip proprietate: "Penthouse" → "Apartament" ──────────────
+  if (typeIsPenthouse) {
+    console.log(`  🔄 Tip: "Penthouse" → "Apartament"`);
+    data.type = 'Apartament';
+  }
+
+  // ── 2. Titlu: înlocuiește "Penthouse" → "Apartament" (case-insensitive) ──
+  if (titleContainsPenthouse && typeof data.title === 'string') {
+    const newTitle = data.title.replace(/penthouse/gi, 'Apartament');
+    console.log(`  🔄 Titlu: "${data.title}" → "${newTitle}"`);
+    data.title = newTitle;
+  }
+
+  // ── 3. Etaj: convertește pentru formatul PremierImobil ──────────
+  // Dacă etajul real nu e cunoscut (null/'N'A/undefined/gol)
+  // dar total etaje există, penthouse = ultimul etaj
+  const floorMissing =
+    data.floor == null ||
+    data.floor === '' ||
+    data.floor === 'N/A' ||
+    data.floor === 'n/a';
+
+  const floorsExist =
+    data.floors != null &&
+    data.floors !== '' &&
+    data.floors !== 'N/A' &&
+    data.floors !== 'n/a';
+
+  if (floorMissing && floorsExist) {
+    console.log(`  🔄 Etaj: lipsă (penthouse) → setat la etajul maxim: ${data.floors}`);
+    data.floor = String(data.floors);
+  } else if (!floorMissing) {
+    console.log(`  🔄 Etaj păstrat: ${data.floor}/${data.floors || '?'}`);
+  } else {
+    // Etajul lipsește complet — nu inventa date
+    console.log(`  🔄 Etaj: complet lipsă din anunțul sursă — se lasă gol`);
+  }
+
+  console.log('✅ [PENTHOUSE CONVERSION] Conversie completă');
+  console.log('');
+
+  return data;
+}
+
 const postToPremier = async (data, ctx, removeWatermarkFlag) => {
   try {
   // ── VALIDATION: Ensure data object is not empty ──
@@ -350,6 +438,15 @@ const postToPremier = async (data, ctx, removeWatermarkFlag) => {
   }
 
   console.log(`  📸 Total IDs încărcate: ${uploadedImageIds.length} [${uploadedImageIds.join(", ")}]`);
+
+  // ══════════════════════════════════════════════════════════════
+  // PENTHOUSE CONVERSION (doar pentru PremierImobil)
+  // ══════════════════════════════════════════════════════════════
+  // Convertește "Penthouse" → "Apartament" în titlu și tip,
+  // ajustează etajul pentru formatul PremierImobil.
+  // Pe 999.md, Facebook, Instagram — rămâne "Penthouse" neschimbat.
+  // ══════════════════════════════════════════════════════════════
+  convertPenthouseForPremier(data);
 
   // ── TYPE NORMALIZATION ──────────────────────────────────────────
   // Map all possible data.type values from different scrapers to canonical types

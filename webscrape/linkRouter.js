@@ -15,6 +15,9 @@ const { scrap_premier }          = require("./websites/premier");
 const { scrap_immobiliare }      = require("./websites/immobiliare");
 const { parseLoyal }             = require("./websites/loyal");
 
+// Retry wrapper with AI escalation for resilient scraping
+const { extractWithRetry }       = require("../utils/retryExtract");
+
 const axios                      = require("axios");
 const { sendMessageFromPremier } = require("../utils/message_main_premier");
 
@@ -314,7 +317,7 @@ const returnInfoInChat = async (adData, ctx, userAdId, db) => {
   // CRASH-PROOF: Wrap entire function in try-catch to force publication
   // to complete even when unexpected errors occur
   try {
-    if (!adData) return ctx.reply("Nu am putut extrage datele.");
+    if (!adData) return ctx.reply("❌ Nu s-au putut extrage datele. Verificați link-ul.");
 
     // ══════════════════════════════════════════════════════════════
     // ANTI-HALLUCINATION: PAGE NOT FOUND
@@ -658,8 +661,47 @@ const linkRouter = async (ctx, userAdId, db) => {
 
   try {
     if (["999.md", "m.999.md"].includes(host)) {
-      const adData = await scrap_999(ctx, ctx.message.text.trim());
-      return returnInfoInChat(adData, ctx, userAdId, db);
+      const url = ctx.message.text.trim();
+
+      // Trimitem mesaj inițial + notificăm utilizatorul de status
+      await replyWithTimeout(ctx, `🔍 Se încearcă extragerea datelor...`, {}, 10000);
+
+      try {
+        const adData = await extractWithRetry(url, {
+          maxAttempts: 5,
+          delayMs: 3000,
+          useAI: true,
+          ctx, // Transmite ctx pentru scrapere care au nevoie de session (phoneNr etc.)
+          onAttempt: async (attempt, maxAttempts) => {
+            await replyWithTimeout(
+              ctx,
+              `⏳ Încercare ${attempt}/${maxAttempts}...`,
+              {},
+              10000
+            );
+          },
+        });
+
+        // ✅ Extragere reușită
+        if (adData?._aiExtracted) {
+          await replyWithTimeout(ctx, `🤖 Datele s-au extras prin AI.`, {}, 10000);
+        }
+        await replyWithTimeout(ctx, `✅ Extragere reușită!`, {}, 10000);
+
+        return returnInfoInChat(adData, ctx, userAdId, db);
+      } catch (retryErr) {
+        // ❌ Eșec total după toate încercările
+        console.error('❌ [linkRouter] Retry extraction failed:', retryErr.message);
+        await replyWithTimeout(
+          ctx,
+          `❌ Eșec total după 5 încercări.\n\n` +
+          `Nu s-au putut extrage datele pentru acest anunț. ` +
+          `Verificați link-ul și încercați din nou.`,
+          {},
+          15000
+        );
+        return;
+      }
 
     } else if (host === "premierimobil.md") {
       const adData = await scrap_premier(ctx, ctx.message.text.trim());

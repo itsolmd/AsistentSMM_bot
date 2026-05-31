@@ -20,6 +20,8 @@ const {
   formatLocation,
   buildGeoAddress,
   getLocationArrayForFilter,
+  isPlaceholderWord,
+  isKnownSector,
 } = require('../../utils/regionParser');
 
 // ── AI-Powered Floor Extraction (3-Stage) ───────────────────
@@ -50,8 +52,278 @@ const { isPageValid, extractBodyContent } = require('../../utils/pageValidator')
    • #10: cleanNaN, cleanNullInjections, normalizeWhitespace
    • #11: Format final corect cu 🆔 ID: DB_Ap...
    ================================================================ */
+
+/**
+* extractMapAddress — Extrage adresa completă din harta 999.md
+*
+* Selectorul corect: div[class*="styles_map__address"]
+* (NU div[class*="styles_map__title"] — acela conține doar "Locaţie")
+*
+* HTML real:
+*   <div class="styles_map__wrapper__MRrMQ">
+*     <div>
+*       <div class="styles_map__title__UgISm">Locaţie</div>
+*       <div class="styles_map__address__wnNuo">
+*         Chișinău mun., Chișinău, Centru, str. Mihail Kogălniceanu, 85
+*       </div>
+*     </div>
+*   </div>
+*
+* @param {Page} page - Puppeteer Page instance
+* @returns {Object|null} { municipality, city, sector, street, streetNumber, original }
+*/
+async function extractMapAddress(page) {
+ try {
+    // ══════════════════════════════════════════════════════════════
+    // STRATEGIA 1: Selector direct pe clasa adresei (cel mai rapid)
+    // ══════════════════════════════════════════════════════════════
+    let raw = null;
+
+    // Selector primar — clasa exactă a adresei (NU titlul "Locaţie")
+    raw = await page.$eval(
+      'div[class*="styles_map__address"]',
+      el => el.innerText?.trim()
+    ).catch(() => null);
+
+    // Selector alternativ: fallback la map__address fără prefix styles_
+    if (!raw) {
+      raw = await page.$eval(
+        'div[class*="map__address"]',
+        el => el.innerText?.trim()
+      ).catch(() => null);
+    }
+
+    // Selector alternativ: mapAddress (camelCase variant)
+    if (!raw) {
+      raw = await page.$eval(
+        'div[class*="mapAddress"]',
+        el => el.innerText?.trim()
+      ).catch(() => null);
+    }
+
+    // Selector alternativ: map_address (underscore variant)
+    if (!raw) {
+      raw = await page.$eval(
+        'div[class*="map_address"]',
+        el => el.innerText?.trim()
+      ).catch(() => null);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // STRATEGIA 2: Dacă niciun selector direct nu a funcționat, caută în wrapper
+    // ══════════════════════════════════════════════════════════════
+    if (!raw) {
+      raw = await page.evaluate(() => {
+        const wrapper = document.querySelector('[class*="map__wrapper"]');
+        if (!wrapper) return null;
+        const divs = wrapper.querySelectorAll('div');
+        for (const div of divs) {
+          const text = div.innerText?.trim();
+          if (text && (
+            text.includes('mun.') ||
+            text.includes('str.') ||
+            /\d{2,}/.test(text)
+          ) && text !== 'Locaţie' && text !== 'Locație') {
+            return text;
+          }
+        }
+        return null;
+      });
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // STRATEGIA 3: "Vezi toate apartamentele" fallback
+    // Când clasa CSS e hash-uită diferit sau componenta hărții e
+    // încărcată altfel, caută adresa lângă link-ul "Vezi toate
+    // apartamentele din acest cartier".
+    // ══════════════════════════════════════════════════════════════
+    if (!raw) {
+      raw = await page.evaluate(() => {
+        const links = document.querySelectorAll('a');
+        for (const link of links) {
+          // Caută linkul cu text "Vezi toate apartamentele" sau "acest cartier"
+          if (link.textContent?.includes('Vezi toate') ||
+              link.textContent?.includes('acest cartier')) {
+            // Caută în toată secțiunea părinte
+            const parent = link.closest('[class*="map"]') ||
+                           link.closest('div[class*="styles_map"]') ||
+                           link.closest('section') ||
+                           link.parentElement?.parentElement;
+            if (parent) {
+              const divs = parent.querySelectorAll('div');
+              for (const div of divs) {
+                const t = div.innerText?.trim();
+                if (t && t.length > 10 &&
+                    !t.includes('Locaţie') && !t.includes('Locație') &&
+                    !t.includes('Vezi toate') && !t.includes('Hartă') && !t.includes('harta') &&
+                    // Trebuie să conțină o adresă reală
+                    (t.includes('str.') || t.includes('mun.') ||
+                     t.includes('bd.') || /\d{2,}/.test(t))) {
+                  return t;
+                }
+              }
+            }
+            // Dacă nu s-a găsit în părintele apropiat, caută mai larg
+            const wider = document.body;
+            const allDivs = wider.querySelectorAll('div');
+            for (const div of allDivs) {
+              const t = div.innerText?.trim();
+              if (t && t.length > 10 &&
+                  !t.includes('Locaţie') && !t.includes('Locație') &&
+                  t.includes('str.') && t.includes('mun.') &&
+                  /\d/.test(t)) {
+                return t;
+              }
+            }
+          }
+        }
+        return null;
+      });
+    }
+
+    if (!raw || raw === 'Locaţie' || raw === 'Locație') return null;
+
+    console.log('[ADDRESS MAP] ✅ Extracted from map address div:', raw);
+
+    // ══════════════════════════════════════════════════════════════
+    // PARSEAZĂ adresa cu regex specific pentru stradă
+    // Input: "Chișinău mun., Chișinău, Centru, str. Mihail Kogălniceanu, 85"
+    // ══════════════════════════════════════════════════════════════
+    const parts = raw.split(',').map(p => p.trim());
+
+    let municipality = null, city = null, sector = null;
+    let street = null, streetNumber = null;
+
+    // Known Moldovan cities (pentru detectare robustă)
+    const KNOWN_CITIES = new Set([
+      'chișinău', 'chisinau', 'bălți', 'balți', 'balti',
+      'orhei', 'soroca', 'ungheni', 'cahul', 'edineț', 'edinet'
+    ]);
+
+    // Known sector names (pentru detectare fără whitelist)
+    const KNOWN_SECTORS = new Set([
+      'centru', 'botanica', 'buiucani', 'ciocana',
+      'rîșcani', 'riscani', 'telecentru', 'sculeni'
+    ]);
+
+    const knownLabelRe = /^(mun\.|or\.|str\.|bd\.|șos\.|al\.|pl\.|sat\.|com\.)/i;
+
+    // ── REGEX SPECIFIC pentru stradă + număr (TASK 3) ─────────
+    // Captează: "str. Mihail Kogălniceanu, 85" → street="Mihail Kogălniceanu", streetNumber="85"
+    // Suportă: str., bd., șos., al., pl.
+    const streetRegex = /\b(str\.|bd\.|șos\.|al\.|pl\.)\s*([^,]+?)(?:,\s*(\d+[a-zA-Z\/]*))?(?:,|$)/;
+    const streetMatch = raw.match(streetRegex);
+    if (streetMatch) {
+      street = streetMatch[2].trim();
+      streetNumber = streetMatch[3] || null;
+    }
+
+    const remainingParts = [];
+
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      const lower = p.toLowerCase().trim();
+
+      // 1. Municipiu: se termină sau conține "mun."
+      if (p.endsWith('mun.') || p.includes('mun.')) {
+        municipality = p;
+        continue;
+      }
+
+      // 2. Oraș (city): nume din lista cunoscută
+      if (!city) {
+        const cityKey = lower.replace(/^or\.\s*/i, '').trim();
+        if (KNOWN_CITIES.has(cityKey)) {
+          city = p.replace(/^or\.\s*/i, '').trim();
+          continue;
+        }
+      }
+
+      // 3. Sector: nume din lista cunoscută
+      if (!sector && KNOWN_SECTORS.has(lower)) {
+        sector = p;
+        continue;
+      }
+
+      // 4. Stradă cu prefix (str., bd., șos., al., pl.) — deja extrasă prin regex mai sus
+      if (street && (p.startsWith('str.') || p.startsWith('bd.') ||
+          p.startsWith('șos.') || p.startsWith('al.') ||
+          p.startsWith('pl.'))) {
+        // Deja extras — skip
+        continue;
+      }
+
+      // 5. Număr de stradă (doar cifre, opțional literă) — deja extras prin regex
+      if (streetNumber && /^\d+[a-zA-Z]?$/.test(p)) {
+        continue;
+      }
+
+      // 6. Orice label cunoscut (mun., or., str.) — skip
+      if (knownLabelRe.test(p)) continue;
+
+      // 7. Partea curentă e prima parte după city/sector — probabil stradă fără prefix
+      if (!street && sector && !knownLabelRe.test(p) && p.length > 1) {
+        street = p;
+        continue;
+      }
+
+      // 8. Păstrează ca parte reziduală (pentru numere compuse gen "44/1")
+      remainingParts.push(p);
+    }
+
+    // Dacă nu s-a detectat city prin lista cunoscută, încearcă al doilea part
+    if (!city && parts.length >= 2) {
+      const candidate = parts[1].replace(/^or\.\s*/i, '').trim();
+      if (candidate && !candidate.endsWith('mun.') && candidate.length > 1) {
+        city = candidate;
+      }
+    }
+
+    // Dacă nu s-a detectat sector, încearcă al treilea part
+    if (!sector && parts.length >= 3) {
+      const candidate = parts[2].trim();
+      const looksLikeStreet = /^(str\.|bd\.|șos\.|al\.|pl\.)/i.test(candidate) ||
+        /[\u0400-\u04FF]/.test(candidate) ||
+        /^\d/.test(candidate);
+      if (candidate && !candidate.endsWith('mun.') && candidate !== city &&
+          candidate.length > 1 && !looksLikeStreet) {
+        sector = candidate;
+      }
+    }
+
+    // Numere compuse din remainingParts
+    if (!streetNumber && remainingParts.length > 0) {
+      const combined = remainingParts.join('/');
+      if (/^\d+[a-zA-Z]?(\/\d+[a-zA-Z]?)*$/.test(combined)) {
+        streetNumber = combined;
+      } else if (!street) {
+        street = combined;
+      }
+    }
+
+    return {
+      municipality,
+      city,
+      sector,
+      street,
+      streetNumber,
+      original: raw
+    };
+
+  } catch (err) {
+    console.log('[ADDRESS MAP] ❌ Failed:', err.message);
+    return null;
+  }
+}
+
 const scrap_999 = async (ctx, url) => {
   try {
+    // ── FIX: Handle direct URL call without Telegram context (testing / AI extraction) ──
+    if (typeof url === 'undefined' && typeof ctx === 'string') {
+      url = ctx;
+      ctx = null;
+    }
+    
     // ── 1. Normalizare URL ──────────────────────────────────────
     if (url.startsWith("https://m.999.md")) {
       url = url.replace("https://m.999.md", "https://999.md");
@@ -130,6 +402,18 @@ const scrap_999 = async (ctx, url) => {
 
     console.log("✅ [SCRAP_999] Pagina încărcată cu succes");
     console.log("");
+
+    // ══════════════════════════════════════════════════════════════
+    // WAIT for lazy-loaded map address element (React component)
+    // În 999.md componenta hărții se încarcă asincron DUPĂ networkidle2.
+    // Fără acest wait, selectorul [class*="map__address"] nu găsește nimic.
+    // ══════════════════════════════════════════════════════════════
+    try {
+      await page.waitForSelector('[class*="map__address"]', { timeout: 5000 });
+      console.log('[ADDRESS MAP] ✅ Map address element appeared in DOM after wait');
+    } catch (_waitErr) {
+      console.log('[ADDRESS MAP] ℹ️ Map address element did not appear in DOM — will use fallbacks');
+    }
 
     // ══════════════════════════════════════════════════════════════
     // ANTI-HALLUCINATION: PAGE VALIDATION
@@ -388,19 +672,156 @@ const scrap_999 = async (ctx, url) => {
       }
 
       // ── 3. Locație completă ─────────────────────────────────────
-      // BUG FIX: Use .styles_map__title__UgISm as PRIMARY source for address
-      // Supports Romanian, Russian, and mixed addresses
+      // CASCADE FALLBACK: Încearcă multiple surse pentru adresă
+      // PRIORITATE EXTRAGERE ADRESĂ (în ordine):
+      //   1. Selector CSS [class*="map__title"] — adresă completă cu stradă
+      //   2. DOM search — element cu pattern "mun., [Oraș], [Sector], str."
+      //   3. Breadcrumb-ul paginii
+      //   4. Regiunea din bodyText
+      //   5. Titlul h2
+      //   6. Meta tags (og:title, description)
+      //   7. Lasă N/A — NU adresă hardcodată
       let location = 'N/A';
-      const mapTitleEl = document.querySelector('.styles_map__title__UgISm');
-      if (mapTitleEl) {
-        location = mapTitleEl.textContent.trim();
+
+      // ── PRIORITATE 1: Selector [class*="map__address"] — adresa reală ──
+      // ACEASTA este sursa PRIORITARĂ — conține adresa reală cu stradă.
+      // HTML structure on 999.md:
+      //   <div class="styles_map__wrapper__MRrMQ">
+      //     <div>
+      //       <div class="styles_map__title__UgISm">Locaţie</div>         ← LABEL (ignorat)
+      //       <div class="styles_map__address__wnNuo">Chișinău mun., Chișinău, Centru, str. Mihail Kogălniceanu, 85</div>  ← ADRESA REALĂ
+      //     </div>
+      //   </div>
+      // The map__title element contains only "Locaţie" (a placeholder label),
+      // while map__address contains the actual street address with coordinates.
+      // This selector ensures we get the REAL address, not the label.
+      const mapAddressSelectors = [
+        '[class*="map__address"]',
+        'div[class*="styles_map__address"]',
+        '[class*="map__address__"]',
+      ];
+      {
+        let mapAddressEl = null;
+        for (const sel of mapAddressSelectors) {
+          mapAddressEl = document.querySelector(sel);
+          if (mapAddressEl) break;
+        }
+        if (mapAddressEl) {
+          const rawText = mapAddressEl.textContent.trim();
+          const isPlaceholderText = (v) => {
+            if (!v || typeof v !== 'string') return false;
+            const ps = new Set(['locaţie', 'locatie', 'localitate', 'adresă', 'adresa',
+              'nedefinit', 'nedefinită', 'n/a', 'na', 'n.a.', '—', '-', 'null', 'undefined']);
+            return ps.has(v.toLowerCase().trim());
+          };
+          if (rawText && rawText.length > 5 && !isPlaceholderText(rawText)) {
+            location = rawText;
+            console.log('[ADDRESS MAP] ✅ Extracted from map address element:', rawText);
+          }
+        }
       }
+
+      // ── PRIORITATE 2: Selector [class*="map__title"] — doar fallback ──
+      // map__title conține de obicei "Locaţie" (placeholder), DAR în unele
+      // cazuri (anunțuri vechi sau format alternativ) poate conține adresa.
+      // Folosește doar ca fallback dacă map__address nu a returnat nimic.
+      if (location === 'N/A') {
+        const mapTitleSelectors = [
+          '[class*="map__title"]',
+          'div[class*="styles_map__title"]',
+          '[class*="map__title__"]',
+        ];
+        let mapTitleEl = null;
+        for (const sel of mapTitleSelectors) {
+          mapTitleEl = document.querySelector(sel);
+          if (mapTitleEl) break;
+        }
+        if (mapTitleEl) {
+          const rawText = mapTitleEl.textContent.trim();
+          const isPlaceholderText = (v) => {
+            if (!v || typeof v !== 'string') return false;
+            const ps = new Set(['locaţie', 'locatie', 'localitate', 'adresă', 'adresa',
+              'nedefinit', 'nedefinită', 'n/a', 'na', 'n.a.', '—', '-', 'null', 'undefined']);
+            return ps.has(v.toLowerCase().trim());
+          };
+          if (rawText && rawText.length > 5 && !isPlaceholderText(rawText)) {
+            location = rawText;
+            console.log('[ADDRESS MAP] Extracted from map title (fallback):', rawText);
+          }
+        }
+      }
+
+      // ── PRIORITATE 2: Caută în DOM element cu pattern de adresă ──
+      // Când clasa CSS se schimbă complet și selectorul de mai sus eșuează,
+      // caută un element div/span care conține patternul:
+      //   "mun., [Oraș], [Sector], str. [NumeStradă]"
+      if (location === 'N/A') {
+        const addressPattern = /mun\.\s*,\s*[A-Za-zăâîșțĂÂÎȘȚ\s-]+,\s*[A-Za-zăâîșțĂÂÎȘȚ\s-]+,\s*str\./i;
+        // Caută în apropierea linkului "Vezi toate apartamentele din acest cartier"
+        const nearbyLinks = document.querySelectorAll('a');
+        for (const link of nearbyLinks) {
+          if (link.textContent.includes('Vezi toate') || link.textContent.includes('acest cartier')) {
+            const parent = link.closest('div, section') || link.parentElement;
+            if (parent) {
+              const allTexts = parent.querySelectorAll('div, span');
+              for (const el of allTexts) {
+                const text = el.textContent.trim();
+                if (addressPattern.test(text) && text.length > 15) {
+                  location = text;
+                  console.log('[ADDRESS MAP] Extracted from nearby element (address pattern):', text);
+                  break;
+                }
+              }
+            }
+            if (location !== 'N/A') break;
+          }
+        }
+        // Dacă tot nu s-a găsit, caută în toată pagina
+        if (location === 'N/A') {
+          const allElements = document.querySelectorAll('div, span');
+          for (const el of allElements) {
+            const text = el.textContent.trim();
+            if (addressPattern.test(text) && text.length > 15) {
+              location = text;
+              console.log('[ADDRESS MAP] Extracted from DOM element (address pattern fallback):', text);
+              break;
+            }
+          }
+        }
+      }
+
+      // Pas 3: Breadcrumb-ul paginii
+      if (location === 'N/A') {
+        const breadcrumbSelectors = [
+          'nav[aria-label="Breadcrumb"]',
+          'nav[aria-label="breadcrumb"]',
+          '.breadcrumbs',
+          '[class*="breadcrumb"]',
+          'nav ol li',
+          'nav ul li',
+        ];
+        for (const sel of breadcrumbSelectors) {
+          const els = document.querySelectorAll(sel);
+          if (els.length > 0) {
+            const parts = Array.from(els).map(el => el.textContent.trim()).filter(Boolean);
+            const locationParts = parts.filter(p =>
+              !/imobiliare|real estate|999|acasa|home|inapoi|back/i.test(p)
+            );
+            if (locationParts.length >= 2) {
+              location = locationParts.join(', ');
+              break;
+            }
+          }
+        }
+      }
+      // Pas 4: Regiunea din bodyText
       if (location === 'N/A') {
         const regionMatch = bodyText.match(/Regiunea\s*[:]\s*(.+?)(?:\n|$)/i);
         if (regionMatch) {
           location = regionMatch[1].trim();
         }
       }
+      // Pas 5: Titlul h2
       if (location === 'N/A') {
         const h2 = document.querySelector('h2');
         if (h2) {
@@ -411,7 +832,50 @@ const scrap_999 = async (ctx, url) => {
           }
         }
       }
+      // Pas 6: Meta tags (og:title, description)
+      if (location === 'N/A') {
+        const ogTitle = document.querySelector('meta[property="og:title"]');
+        if (ogTitle) {
+          const ogContent = ogTitle.getAttribute('content') || '';
+          const parts = ogContent.split(',').map(s => s.trim());
+          if (parts.length >= 2) {
+            location = parts.slice(1).join(', ').trim();
+          }
+        }
+      }
+      if (location === 'N/A') {
+        const metaDesc = document.querySelector('meta[name="description"]');
+        if (metaDesc) {
+          const descContent = metaDesc.getAttribute('content') || '';
+          const parts = descContent.split(',').map(s => s.trim());
+          if (parts.length >= 2) {
+            location = parts.slice(1).join(', ').trim();
+          }
+        }
+      }
       console.log(`  📍 3) Locație: ${location}`);
+
+      // ── BUG FIX: Detect placeholder labels like "Locaţie" (Romanian for "Location") ──
+      // When 999.md shows "Locaţie" as the address, it means the seller didn't specify
+      // a real address. Reset to 'N/A' so the hardcoded fallback logic kicks in later.
+      //
+      // NOTE: isPlaceholderWord is defined in Node.js scope (regionParser), NOT in browser
+      // scope. We INLINE the logic here because page.evaluate() runs in the browser context
+      // and cannot access Node.js functions. This was the root cause of:
+      //   "isPlaceholderWord is not defined" at runtime.
+      const isPlaceholder = (v) => {
+        if (!v || typeof v !== 'string') return false;
+        const PLACEHOLDER_SET = new Set([
+          'locaţie', 'locatie', 'localitate', 'adresă', 'adresa',
+          'nedefinit', 'nedefinită', 'n/a', 'na', 'n.a.',
+          '—', '-', 'null', 'undefined',
+        ]);
+        return PLACEHOLDER_SET.has(v.toLowerCase().trim());
+      };
+      if (location !== 'N/A' && isPlaceholder(location)) {
+        console.warn(`⚠️ [scrap_999] Location is a placeholder word ("${location}") — resetting to N/A`);
+        location = 'N/A';
+      }
 
       // ── 4. Număr de camere (dormitoare) ─────────────────────────
       let rooms = 'N/A';
@@ -455,6 +919,17 @@ const scrap_999 = async (ctx, url) => {
         if (totalFloorsRaw) {
           const n = extractNumber(totalFloorsRaw);
           if (n) totalFloors = n;
+        }
+      }
+      // ── BUG FIX: Penthouse / Mansardă — set floor = totalFloors ─────────
+      // Când proprietatea este Penthouse sau Mansardă, etajul curent nu este
+      // specificat explicit, dar "Număr de etaje" conține totalul.
+      // În acest caz, setăm floor = totalFloors pentru a afișa "5/5" sau "10/10".
+      if (floor === 'N/A' && totalFloors !== 'N/A') {
+        const pt = (typeof propertyType === 'string') ? propertyType.toLowerCase() : '';
+        if (pt === 'penthouse' || pt === 'mansardă' || pt === 'mansarda') {
+          floor = totalFloors;
+          console.log(`  🏢 6) BUG FIX: Penthouse/Mansardă detected — setting floor = totalFloors = ${floor}`);
         }
       }
       console.log(`  🏢 6) Etaj: ${floor}/${totalFloors}`);
@@ -811,6 +1286,52 @@ const scrap_999 = async (ctx, url) => {
       let description = 'N/A';
       if (advert?.body) {
         description = advert.body;
+      }
+      // FIX #2: Fallback la bodyText dacă advert.body lipsește (App Router / RSC pages)
+      if (description === 'N/A' || description === '' || description === null) {
+        // Try to find the description section in the page using common labels
+        const descLabels = ['Descriere', 'Descrierea', 'Description', 'Despre'];
+        for (const label of descLabels) {
+          const found = extractByLabel(label, bodyText);
+          if (found && found.length > 10) {
+            description = found;
+            console.log(`[DESC FALLBACK] Found description via label "${label}": ${found.substring(0, 80).replace(/\n/g, ' ')}...`);
+            break;
+          }
+        }
+        // If still no description, try to get text from a description/content section in DOM
+        if (description === 'N/A' || description === '' || description === null) {
+          // Look for common description containers
+          const descElSelectors = [
+            'div[class*="description"]',
+            'div[class*="desc__"]',
+            'div[class*="advert__body"]',
+            'div[class*="advert_body"]',
+            'section[class*="description"]',
+            'article[class*="description"]',
+          ];
+          for (const sel of descElSelectors) {
+            const el = document.querySelector(sel);
+            if (el) {
+              const text = el.textContent?.trim();
+              if (text && text.length > 20) {
+                description = text;
+                console.log(`[DESC FALLBACK] Found from DOM selector "${sel}": ${text.substring(0, 80).replace(/\n/g, ' ')}...`);
+                break;
+              }
+            }
+          }
+        }
+        // Last resort: use a generous portion of bodyText, filtered for meaningful content
+        if (description === 'N/A' || description === '' || description === null) {
+          const meaningfulLines = bodyText.split('\n')
+            .map(l => l.trim())
+            .filter(l => l.length > 30 && !/^(Descriere|Locaţie|Preț|Etaj|Suprafață|Număr de camere|Grup sanitar|Fond locativ|Tip încălzire|Starea|Compartimentare|Balcon|Living|Dezvoltator|Telefon|Vezi toate|Hartă|Anunţuri|Recomandate)/i.test(l));
+          if (meaningfulLines.length > 0) {
+            description = meaningfulLines.slice(0, 5).join('\n');
+            console.log(`[DESC FALLBACK] Extracted ${meaningfulLines.length} meaningful lines from bodyText`);
+          }
+        }
       }
       const descPreview = description !== 'N/A' ? description.substring(0, 80).replace(/\n/g, ' ') + '...' : 'N/A';
       console.log(`  📄 12) Descriere: ${descPreview}`);
@@ -1498,27 +2019,248 @@ const scrap_999 = async (ctx, url) => {
     let normalizedDeveloper = extracted.developer;
     console.log('[scrap_999] Parsed developer:', extracted.developer);
 
-    // ── 5. Aplică regionParser pe locație (BUG #2, #3 FIXED) ──
-    const parsedLocation = parseLocation(extracted.location);
-    console.log("[ADDRESS PARSER] Parsed:", parsedLocation);
-    const formattedLocation = formatLocation(parsedLocation, true);
+    // ══════════════════════════════════════════════════════════════
+    // MAP ADDRESS — Extrage adresa completă din div-ul hărții (SURSA PRIMARĂ)
+    // Selectorul corect: div[class*="styles_map__address"]
+    // Acesta conține adresa reală (ex: "Chișinău mun., Chișinău, Centru, str. Mihail Kogălniceanu, 85")
+    // Spre deosebire de div[class*="styles_map__title"] care conține doar "Locaţie"
+    // ══════════════════════════════════════════════════════════════
+    let mapAddressResult = await extractMapAddress(page);
 
-    // ── FALLBACK: If location parsing failed (no city found), use hardcoded address ──
-    // This prevents flow interruption when the page's address selector fails or
-    // returns an unparseable string. The bot continues with a valid default address.
+    if (mapAddressResult && mapAddressResult.city) {
+      console.log('[ADDRESS MAP] ✅ Map address parsed successfully:', JSON.stringify(mapAddressResult, null, 2));
+      // Override extracted.location with the full original text from the map div
+      // This ensures parseLocation() gets the richest possible input AND that
+      // regionText / summary logs reflect the real address, not a placeholder.
+      extracted.location = mapAddressResult.original;
+
+      // CRAFT parsedLocation DIRECTLY from our precise parser (skip parseLocation's heuristic)
+      // mapAddressResult.street is already clean (no "str." prefix because extractMapAddress strips it)
+      const mapStreet = mapAddressResult.street ? 'str. ' + mapAddressResult.street : null;
+      const mapParsed = {
+        municipality: mapAddressResult.municipality || null,
+        city: mapAddressResult.city || null,
+        sector: mapAddressResult.sector || null,
+        street: mapStreet,
+        streetNumber: mapAddressResult.streetNumber || null,
+        original: mapAddressResult.original,
+      };
+      console.log('[ADDRESS MAP] ✅ Crafted parsedLocation from map address:', JSON.stringify(mapParsed, null, 2));
+
+      // Attach to extracted so the fallback logic after parseLocation() can use it
+      extracted._mapParsedLocation = mapParsed;
+    } else {
+      console.log('[ADDRESS MAP] ℹ️ No map address found — will use fallback parsers');
+    }
+
+    // ── 5. Aplică regionParser pe locație (BUG #2, #3 FIXED) ──
+    let parsedLocation = parseLocation(extracted.location);
+
+    // ── PRIORITY OVERRIDE: If map address was extracted, use it INSTEAD of parseLocation result ──
+    // parseLocation may not extract street/streetNumber correctly (it requires "str." prefix).
+    // Our extractMapAddress parser is more precise and handles all edge cases.
+    if (extracted._mapParsedLocation && extracted._mapParsedLocation.city) {
+      parsedLocation = extracted._mapParsedLocation;
+      console.log('[ADDRESS MAP] ✅ Using map address parsedLocation (overrode parseLocation):', JSON.stringify(parsedLocation, null, 2));
+    }
+    // FIX #2: Declare regionText variable for synchronization after fallback
+    let regionText;
+    console.log("[ADDRESS PARSER] Parsed:", parsedLocation);
+    let formattedLocation = formatLocation(parsedLocation, true);
+
+    // Sync regionText with parsedLocation for summary log display
+    regionText = parsedLocation?.original || formattedLocation;
+
+    // ── FALLBACK: If location parsing failed (no city found), extract from page title ──
+    // Instead of using a hardcoded address (which is wrong for most listings),
+    // parse the page title which contains location info like "Centru, Chișinău".
     if (!parsedLocation || !parsedLocation.city) {
-      console.warn('⚠️ [scrap_999] Location parsing failed — using hardcoded fallback address: Chișinău, Botanica, bd. Cuza Vodă, 17/1');
+      console.warn('⚠️ [scrap_999] Location parsing failed — extracting from page title...');
+
+      // ── TITLE STRUCTURE (ALWAYS the same on 999.md) ─────────────────
+      // "Apartament cu 3 camere, Centru, Chișinău, Chișinău mun."
+      //   parts[0] = Tip proprietate (IGNORED — never a real address)
+      //   parts[1] = Sector (ex: "Centru", "Botanica", "Buiucani")
+      //   parts[2] = Oraș  (ex: "Chișinău")
+      //   parts[3] = Municipiu (ex: "Chișinău mun.")
+      //
+      // Titlul NU conține niciodată o stradă reală → street=null, streetNumber=null
+      // ─────────────────────────────────────────────────────────────────
+      const titleParts = (pageTitle || '').split(',').map(p => p.trim()).filter(Boolean);
+
+      // Normalize sector names
+      const sectorMap = {
+        'centru': 'Centru',
+        'botanica': 'Botanica',
+        'buiucani': 'Buiucani',
+        'ciocana': 'Ciocana',
+        'riscani': 'Rîșcani',
+        'rîșcani': 'Rîșcani',
+        'telecentru': 'Telecentru',
+      };
+
+      // ═══════════════════════════════════════════════════════════════
+      // FIX: Use explicit positional indexing — NOT length-based math
+      //   parts[0] = property type → ALWAYS ignored
+      //   parts[1] = sector
+      //   parts[2] = city
+      //   parts[3] = municipality
+      // ═══════════════════════════════════════════════════════════════
+      let fallbackSector = null;
+      let fallbackCity = null;
+      let fallbackMunicipality = null;
+
+      if (titleParts.length >= 2) {
+        const rawSector = titleParts[1];
+        const sectorLower = rawSector.toLowerCase();
+        fallbackSector = sectorMap[sectorLower] || rawSector;
+      }
+      if (titleParts.length >= 3) {
+        fallbackCity = titleParts[2];
+      }
+      if (titleParts.length >= 4) {
+        fallbackMunicipality = titleParts[3];
+      }
+
+      // If still no city, fall back to generic "Chișinău"
+      if (!fallbackCity) {
+        fallbackCity = 'Chișinău';
+      }
+
+      // BUILD ORIGINAL: location-only parts (skip property description at index 0)
+      const locationOnlyOriginal = titleParts.length >= 2
+        ? titleParts.slice(1).join(', ')
+        : (pageTitle || '');
+
+      // ── street is ALWAYS null from title — 999.md titles never contain street names ──
       parsedLocation = {
-        city: 'Chișinău',
-        sector: 'Botanica',
-        municipality: 'Chișinău mun.',
-        street: 'bd. Cuza Vodă',
-        streetNumber: '17/1',
-        original: 'Chișinău mun., Chișinău, Botanica, bd. Cuza Vodă, 17/1'
+        city: fallbackCity,
+        sector: fallbackSector,
+        municipality: fallbackMunicipality,
+        street: null,
+        streetNumber: null,
+        original: locationOnlyOriginal,
       };
       formattedLocation = formatLocation(parsedLocation, true);
-      console.log('[ADDRESS FALLBACK] Using hardcoded location:', formattedLocation);
+      console.log('[ADDRESS FALLBACK] Extracted from page title — location:', formattedLocation);
+      console.log('[ADDRESS FALLBACK] Title parts:', titleParts);
+      console.log('[ADDRESS FALLBACK] Location-only original:', locationOnlyOriginal);
+
+      // ── FIX: Sync regionText and extracted.location so the summary log reflects the fallback ──
+      // extracted.location remains "N/A" after title fallback, which causes
+      // regionText (line ~2033) and the summary log to show "N/A".
+      regionText = parsedLocation.original;
+      extracted.location = parsedLocation.original || formattedLocation;
+      console.log('[ADDRESS FALLBACK] Synced regionText →', regionText);
+      console.log('[ADDRESS FALLBACK] Synced extracted.location →', extracted.location);
     }
+
+    // ── BUG FIX v4.3: Extract street/number from original when parser misses it ──
+    // parseLocation() requires a "str."/"strada"/"bd." prefix to identify a street.
+    // Some 999.md addresses omit the prefix (e.g. "Chișinău, Buiucani, Nicolae Costin, 44/1").
+    // In that case, the parts after city/sector that look like a street name + number
+    // are silently dropped. We re-extract them here from parsedLocation.original.
+    //
+    // BUG v4.4: Filter out property-type descriptions (e.g. "Apartament cu 3 camere")
+    // that are NOT actual street names.
+    if (parsedLocation && parsedLocation.original && !parsedLocation.street) {
+      const originalParts = parsedLocation.original.split(',').map(p => p.trim()).filter(Boolean);
+      // Remove municipality, city, sector from the parts array
+      const knownParts = new Set([
+        parsedLocation.municipality,
+        parsedLocation.city,
+        parsedLocation.sector,
+      ].filter(Boolean).map(p => p.toLowerCase().trim()));
+
+      // ── BUG v4.4: Known property type descriptions that should NEVER be treated as street names ──
+      // These are phrases like "Apartament cu X camere" that appear in page titles but are NOT addresses.
+      const PROPERTY_DESCRIPTION_PATTERNS = [
+        /^apartament\s+cu\s+\d+\s+camere/i,
+        /^apartament\s+cu\s+living/i,
+        /^casa\s+de\s+locuit/i,
+        /^casa/i,
+        /^vila/i,
+        /^garsoniera/i,
+        /^spațiu/i,
+        /^spatiu/i,
+        /^birou/i,
+        /^comercial/i,
+        /^teren/i,
+        /^penthouse/i,
+        /^duplex/i,
+        /^triplex/i,
+      ];
+
+      // ══════════════════════════════════════════════════════════════════
+      // FIX #2: Street validation — reject known property/location keywords
+      // that are NEVER real street names (even without prefix).
+      // ══════════════════════════════════════════════════════════════════
+      const PROPERTY_KEYWORDS = [
+        'apartament', 'casă', 'casa', 'oficiu', 'teren',
+        'spațiu', 'spatiu', 'cameră', 'camera', 'vilă', 'vila',
+        'duplex', 'penthouse', 'studio', 'birou', 'comercial',
+        'garsonieră', 'garsoniere', 'garsoniera',
+      ];
+      const isPropertyKeyword = (str) => {
+        if (!str) return false;
+        const lower = str.toLowerCase().trim();
+        return PROPERTY_KEYWORDS.some(kw => {
+          // Match exact or start of string (e.g. "Apartament cu 3 camere")
+          return lower === kw || lower.startsWith(kw + ' ') || lower.startsWith(kw + 'cu');
+        });
+      };
+
+      const leftoverParts = originalParts.filter(p => {
+        const lower = p.toLowerCase().trim();
+        // Remove known parts (municipality, city, sector)
+        if (knownParts.has(lower)) return false;
+        // ── BUG v4.4: Remove property type descriptions (NOT street names) ──
+        for (const pattern of PROPERTY_DESCRIPTION_PATTERNS) {
+          if (pattern.test(lower)) return false;
+        }
+        // FIX #2: Reject property keywords that are NEVER real street names
+        if (isPropertyKeyword(p)) return false;
+        return true;
+      });
+
+      if (leftoverParts.length > 0) {
+        // Check for street number pattern in the last part
+        const STREET_NUM_RE = /^(\d+[A-Za-z]?(?:\/\d+)?(?:-[A-Za-z0-9]+)?)$/;
+        let extractedStreet = null;
+        let extractedStreetNumber = null;
+
+        if (leftoverParts.length >= 2 && STREET_NUM_RE.test(leftoverParts[leftoverParts.length - 1])) {
+          // Last part is a number, second-to-last is the street name
+          extractedStreetNumber = leftoverParts[leftoverParts.length - 1];
+          extractedStreet = leftoverParts.slice(0, -1).join(' ');
+        } else if (leftoverParts.length >= 1) {
+          // Single leftover part — treat as street if it doesn't look like junk
+          const candidate = leftoverParts[0];
+          if (!/^\d+$/.test(candidate) && candidate.length > 1 && !/^(n\/a|na|—|-)$/i.test(candidate)) {
+            extractedStreet = candidate;
+          }
+        }
+
+        if (extractedStreet) {
+          // Add "str." prefix if missing for consistency
+          if (!/^(str\.|strada|bd\.|bulevardul|aleea|șoseaua|calea|ул\.|улица)\s/i.test(extractedStreet)) {
+            extractedStreet = 'str. ' + extractedStreet;
+          }
+          parsedLocation.street = extractedStreet;
+          parsedLocation.streetNumber = extractedStreetNumber;
+          formattedLocation = formatLocation(parsedLocation, true);
+          console.log(`[ADDRESS STREET FIX] Extracted street from original: "${extractedStreet}" (nr: ${extractedStreetNumber || 'N/A'})`);
+          console.log(`[ADDRESS STREET FIX] Updated formattedLocation: "${formattedLocation}"`);
+        }
+      } else {
+        console.log('[ADDRESS STREET FIX] No leftover parts after filtering — skipping street extraction');
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ADDRESS FINAL — Log final al adresei parsate
+    // ══════════════════════════════════════════════════════════════
+    console.log('[ADDRESS FINAL]', JSON.stringify(parsedLocation, null, 2));
 
     // ── 5. Formatează ID-ul ────────────────────────────────────
     const formatId = extracted.advertId
@@ -1648,20 +2390,44 @@ const scrap_999 = async (ctx, url) => {
     }
 
     // ── 7. Construiește formattedText (BUG #1, #11 FIXED) ──────
+    // BUG FIX v4.3: Include street + number in location line
+    // FIX #3: Corrected display format for 999.md listings.
+    //   When street is null    → "Sector, Oraș"        (ex: "Centru, Chișinău")
+    //   When street exists     → "Sector, Oraș, str. NumeStradă Nr"
+    //                           (ex: "Centru, Chișinău, str. Mihai Eminescu 28")
+    //
+    // Note: formatLocation() outputs "Chișinău, Centru" (city-first) but
+    // 999.md Telegram display uses sector-first order.
+    const locBaseParts = [parsedLocation?.sector, parsedLocation?.city].filter(Boolean);
+    let locationLine = locBaseParts.length >= 2
+      ? locBaseParts.join(', ')
+      : formattedLocation; // fallback to parser output if sector/city missing
+
+    if (parsedLocation && parsedLocation.street && parsedLocation.street !== 'N/A') {
+      const streetClean = parsedLocation.street.replace(/^(str\.|strada)\s+/i, '');
+      const streetStr = 'str. ' + streetClean +
+        (parsedLocation.streetNumber ? ' ' + parsedLocation.streetNumber : '');
+      locationLine = locBaseParts.join(', ') + ', ' + streetStr;
+    }
     // Price numeric for filter URL (BUG #8)
     const priceNumeric = parsePriceToNumber(extracted.price);
 
+    // FIX: ctx guard — when scrap_999 is called without Telegram context (unit testing / AI extraction),
+    // use fallback values for session-dependent fields
+    const contactPhone = ctx?.session?.user?.phoneNr || '';
+    const contactName = ctx?.session?.user?.name?.split(" ")[0] || '';
+    const contactLine = contactPhone && contactName ? `📞+${contactPhone}|${contactName}\n` : '';
+
     let formattedText = `${extracted.propertyType}.
 
-📍 Locație: ${formattedLocation}
+📍 Locație: ${locationLine}
 🛏️ Dormitoare: ${extracted.rooms}
 📐 Suprafață: ${extracted.area} m²
 🏢 Etaj: ${floorParsed.floor || extracted.floor}/${floorParsed.totalFloors || extracted.totalFloors}
 🚽 Băi: ${extracted.bathrooms || 1}
 🏗️ Bloc: ${extracted.building}
 💰 Preț: ${extracted.price}
-📞+${ctx.session.user.phoneNr}|${ctx.session.user.name.split(" ")[0]}
-🆔${formatId}`;
+${contactLine}🆔${formatId}`;
 
     // BUG #1 FIXED: clean escaped text
     formattedText = cleanEscapedText(formattedText);
@@ -1802,7 +2568,7 @@ const scrap_999 = async (ctx, url) => {
     console.log("📊 [SCRAP_999] REZUMAT FINAL EXTRAGERE");
     console.log("═══════════════════════════════════════════════════════════");
     console.log(`  🏠 Tip:        ${extracted.propertyType}`);
-    console.log(`  📍 Locație:    ${extracted.location}`);
+    console.log(`  📍 Locație:    ${regionText || result.regionText || 'N/A'}`);
     console.log(`  🛏️  Camere:     ${extracted.rooms}`);
     console.log(`  📐 Suprafață:  ${extracted.area} m²`);
     console.log(`  🏢 Etaj:       ${floorParsed.floor}/${floorParsed.totalFloors}`);
@@ -1837,4 +2603,4 @@ const scrap_999 = async (ctx, url) => {
   }
 };
 
-module.exports = { scrap_999 };
+module.exports = { scrap_999, extractMapAddress };
